@@ -1,4 +1,4 @@
-"""The Viewer (정) 3.6.1 — 한글 모듈 진단 · 폴더 속 ZIP 책 탐색 · 화살표 옆 고정 안내.
+"""The Viewer (정) 3.6.2 — 썸네일 한 줄 진행 안내 · 완료 표시시간 설정.
 설치 (Windows): python -m pip install -U PySide6 "pymupdf>=1.26.6" "pypdf>=5" pywin32 deepl Pillow
 그림 추가 설치만: python -m pip install -U Pillow
 libvips 추가 설치(선택): python -m pip install "pyvips[binary]"
@@ -9,7 +9,10 @@ libvips 추가 설치(선택): python -m pip install "pyvips[binary]"
 그림 확대: 배율·화면 배율에 맞춰 원본을 다시 읽습니다. 긴 변 16,384px·전체 2,500만 픽셀 이내.
 6,000×4,000 사진은 원본 크기까지 표시. 제한을 넘는 그림은 비율 유지 축소, 원본보다 큰 확대는 보간합니다.
 그림은 원본에서 직접 표시합니다. ZIP/CBZ도 전체 압축 해제나 보기용 PDF를 만들지 않습니다.
-하단 진행률은 목록 확인 기준입니다. 그림 디코딩은 보이는 쪽부터 진행하고 메모리 캐시를 제한합니다.
+썸네일 하단의 작은 한 줄 안내는 목록 확인 기준입니다. 크게 보기 화면은 가리지 않습니다.
+정 → 기본 → 완료 안내 표시시간: 0.1~2.0초(0.1초 단위), 기본 0.5초. 완료 후 자동으로 숨깁니다.
+읽는 동안에는 진행 안내와 취소 버튼을 유지합니다. 썸네일을 접으면 안내도 숨겨집니다.
+그림 디코딩은 보이는 쪽부터 진행하고 메모리 캐시를 제한합니다.
 원본 그림/압축파일은 보기를 마칠 때까지 이동·삭제하지 마세요. 편집/저장할 때 필요한 쪽만 PDF로 변환합니다.
 정 → 기본의 붉은 [JPG to PDF]: 현재 그림 또는 파일/폴더를 PDF로 변환 (%·취소 지원).
 목록 확인 중에는 전체 수를 계산합니다. [+]는 읽기를 중단한 뒤 저장 확인과 전체 비우기를 수행합니다.
@@ -86,7 +89,7 @@ from collections import OrderedDict
 from contextlib import contextmanager
 
 APP_NAME = 'The Viewer (정)'
-APP_VERSION = '3.6.1'
+APP_VERSION = '3.6.2'
 BLOG_URL = 'https://blog.naver.com/faintstar'
 # GitHub 도우미가 업로드용 사본에 실제 저장소 주소를 넣는다.
 PROJECT_GITHUB_URL = 'https://github.com/faintstar85-source/the-viewer'
@@ -7742,70 +7745,164 @@ class ImageExportDialog(QDialog):
 
 
 class ImportProgress(QWidget):
+    """썸네일 안의 한 줄 안내. 크게 보기나 썸네일 분할 크기는 바꾸지 않는다."""
     cancelled=Signal()
+    SETTING_KEY='import/status_seconds'
+    DEFAULT_SECONDS=0.5
 
-    def __init__(self,parent):
+    @staticmethod
+    def normalize_seconds(value):
+        try:seconds=float(value)
+        except (TypeError,ValueError,OverflowError):seconds=ImportProgress.DEFAULT_SECONDS
+        if not math.isfinite(seconds):seconds=ImportProgress.DEFAULT_SECONDS
+        return round(max(0.1,min(2.0,seconds)),1)
+
+    def __init__(self,parent,canvas,display_seconds=DEFAULT_SECONDS):
+        # canvas는 첫 목록을 읽는 동안 비활성이다. 취소 버튼은 계속 쓸 수 있도록
+        # 활성 content를 부모로 두되, 표시 좌표는 반드시 썸네일 viewport 안으로 제한한다.
         super().__init__(parent)
+        self.canvas=canvas;self.display_seconds=self.normalize_seconds(display_seconds)
         self.setObjectName('import_progress')
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground,True)
-        self.setStyleSheet('QWidget#import_progress{background:#232734;border:1px solid #714052;border-radius:10px;}'
-            'QLabel{color:#f1eef2;background:transparent;border:0;font-size:12px;}'
-            'QPushButton{color:#fff;background:#8f2942;border:0;border-radius:5px;padding:6px 13px;}'
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.title=QLabel(self);self.detail=QLabel(self)
+        self.title.setObjectName('import_progress_name')
+        for label in (self.title,self.detail):
+            label.setTextFormat(Qt.TextFormat.PlainText)
+            label.setWordWrap(False)
+            label.setAlignment(Qt.AlignmentFlag.AlignLeft|Qt.AlignmentFlag.AlignVCenter)
+        self.cancel=QPushButton('취소',self)
+        self.cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.cancel.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.cancel.setToolTip('읽기 취소 · 이미 표시한 쪽은 유지')
+        self.cancel.setAccessibleName('파일 읽기 취소')
+        self.cancel.clicked.connect(self.cancelled)
+        self.bar=QProgressBar(self);self.bar.setTextVisible(False)
+        self.hide_timer=QTimer(self);self.hide_timer.setSingleShot(True)
+        self.hide_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self.hide_timer.timeout.connect(self.dismiss)
+        self.label='';self.data={};self._path='';self._detail_text='';self._full_detail=''
+        self._active=False;self._finished_at=None;self._dark=None
+        self.sync_style();self.hide()
+
+    def sync_style(self):
+        dark=self.canvas.owner.dark
+        if self._dark==dark:return
+        self._dark=dark
+        background,border,foreground,muted,track=(
+            ('rgba(31,36,48,235)','#414858','#e6eaf1','#a9b1c0','#3c3541') if dark else
+            ('rgba(245,247,251,245)','#cbd2dc','#273244','#657083','#e4dce2'))
+        self.setStyleSheet(
+            f'QWidget#import_progress{{background:{background};border:1px solid {border};border-radius:5px;}}'
+            f'QLabel{{color:{foreground};background:transparent;border:0;font-size:11px;}}'
+            f'QLabel#import_progress_name{{color:{muted};}}'
+            'QPushButton{color:#fff;background:#8f2942;border:0;border-radius:3px;padding:0;font-size:11px;}'
             'QPushButton:hover{background:#bd3553;} QPushButton:disabled{color:#b3a8ae;background:#50333f;}'
-            'QProgressBar{background:#3e3541;border:0;border-radius:3px;height:6px;}'
-            'QProgressBar::chunk{background:#f14665;border-radius:3px;}')
-        layout=QVBoxLayout(self);layout.setContentsMargins(14,9,12,10);layout.setSpacing(5)
-        row=QHBoxLayout();self.title=QLabel();self.title.setMinimumWidth(0)
-        self.cancel=QPushButton('취소');self.cancel.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.cancel.clicked.connect(self.cancelled);row.addWidget(self.title,1);row.addWidget(self.cancel)
-        layout.addLayout(row);self.detail=QLabel();layout.addWidget(self.detail)
-        self.bar=QProgressBar();self.bar.setTextVisible(False);self.bar.setFixedHeight(6);layout.addWidget(self.bar)
-        self.hide_timer=QTimer(self);self.hide_timer.setSingleShot(True);self.hide_timer.timeout.connect(self.hide)
-        self.label='';self.data={};self.hide()
+            f'QProgressBar{{background:{track};border:0;border-radius:1px;}}'
+            'QProgressBar::chunk{background:#f14665;border-radius:1px;}')
 
     def place(self):
-        parent=self.parentWidget();width=max(160,min(640,parent.width()-24))
-        self.setGeometry(max(0,(parent.width()-width)//2),max(0,parent.height()-139),width,97)
-        self.title.setText(self.title.fontMetrics().elidedText(self.label,Qt.TextElideMode.ElideMiddle,max(60,width-105)))
-        self.raise_()
+        if not self._active or self.canvas.isHidden() or self.canvas.owner.thumbnails_collapsed:
+            self.hide();return
+        self.sync_style()
+        viewport=self.canvas.viewport();parent=self.parentWidget()
+        width=min(320,viewport.width()-16)
+        row_height=max(20,self.detail.fontMetrics().height()+2);height=row_height+11
+        if width<80 or viewport.height()<height+16:
+            self.hide();return
+        origin=viewport.mapTo(parent,QPoint(0,0))
+        bottom=viewport.height()-8
+        counter=self.canvas.page_count
+        if not counter.isHidden():bottom=min(bottom,counter.y()-6)
+        y=max(8,bottom-height)
+        self.setGeometry(origin.x()+(viewport.width()-width)//2,origin.y()+y,width,height)
+        # 파일명보다 상태/쪽수에 먼저 공간을 주고, 긴 이름만 가운데를 줄인다.
+        right=width-8
+        if not self.cancel.isHidden():
+            self.cancel.setGeometry(right-32,4,32,row_height);right-=38
+        available=max(0,right-8)
+        detail_width=min(self.detail.fontMetrics().horizontalAdvance(self._detail_text)+2,
+                         max(0,available-min(48,available//3)-6))
+        name_width=max(0,available-detail_width-6)
+        self.title.setGeometry(8,4,name_width,row_height)
+        self.detail.setGeometry(8+name_width+6,4,detail_width,row_height)
+        self.title.setText(self.title.fontMetrics().elidedText(self.label,Qt.TextElideMode.ElideMiddle,name_width))
+        self.detail.setText(self.detail.fontMetrics().elidedText(self._detail_text,Qt.TextElideMode.ElideRight,detail_width))
+        self.bar.setGeometry(8,height-5,width-16,2)
+        self.show();self.raise_()
 
-    def hideEvent(self,event):
-        super().hideEvent(event)
-        editor=getattr(self.window(),'preview_dialog',None)
-        if editor is not None and not editor.closed:editor.position_controls()
+    def set_detail(self,text,full_detail=None):
+        self._detail_text=text;self._full_detail=full_detail if full_detail is not None else text
+        self.setToolTip(self._path+'\n'+self._full_detail)
+        self.setAccessibleName(self.label+' · '+self._full_detail)
+        self.place()
+
+    def add_note(self,text):
+        self.set_detail(self._detail_text+' · '+text,self._full_detail+' · '+text)
+
+    def set_display_seconds(self,value):
+        self.display_seconds=self.normalize_seconds(value)
+        if self._active and self._finished_at is not None:self.schedule_hide()
+
+    def schedule_hide(self):
+        # 설정을 바꿔도 기존 완료 시각부터 계산한다. 새 입력은 begin에서 이 타이머를 취소한다.
+        remaining=self.display_seconds-(time.monotonic()-self._finished_at)
+        if remaining<=0:self.dismiss()
+        else:self.hide_timer.start(max(1,math.ceil(remaining*1000)))
+
+    def dismiss(self):
+        self.hide_timer.stop();self._active=False;self._finished_at=None
+        self.hide();QToolTip.hideText()
 
     def begin(self,path,index,total):
-        self.hide_timer.stop();self.cancel.show();self.cancel.setEnabled(True)
-        self.label=f'{Path(path).name}'+(f' · 입력 {index}/{total}' if total>1 else '')
-        self.setToolTip(str(path));self.update_progress({'phase':'scan','found':0},0)
-        self.show();self.place()
+        self.hide_timer.stop();self._finished_at=None;self._active=True
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents,False)
+        self.cancel.show();self.cancel.setEnabled(True)
+        self.bar.setRange(0,1000);self.bar.setValue(0)
+        self.label=Path(path).name.replace('\n',' ').replace('\r',' ')+(f' · {index}/{total}' if total>1 else '')
+        self._path=str(path);QToolTip.hideText()
+        self.update_progress({'phase':'scan','found':0},0)
 
     def update_progress(self,data,pages,unit='쪽'):
+        if not self._active or self._finished_at is not None:return
         self.data=dict(data)
+        if data.get('name'):self._path=str(data['name'])
         if data.get('phase')=='scan':
-            self.bar.setRange(0,0);self.detail.setText(f'목록 확인 중 · {data.get("found",0):,}개 발견')
+            found=max(0,int(data.get('found',0)))
+            self.bar.setRange(0,0)
+            detail='목록 확인 중'+(f' · {found:,}개' if found else '')
+            full=f'목록 확인 중 · {found:,}개 발견'
         else:
             total=max(0,int(data.get('total',0)));done=max(0,int(data.get('done',0)))
             percent=min(100,max(0,100*(done+data.get('fraction',0))/total)) if total else 0
             self.bar.setRange(0,1000);self.bar.setValue(int(percent*10))
             action='목록' if data.get('phase')=='catalog' else '처리'
-            detail=f'{int(percent)}%  ·  {action} {done:,}/{total:,}파일  ·  {pages:,}{unit}'
-            if data.get('frames',0)>1:detail+=f'  ·  TIFF {data["frame"]}/{data["frames"]}쪽'
-            if data.get('errors'):detail+=f'  ·  오류 {data["errors"]}'
-            self.detail.setText(detail)
-        if data.get('name'):self.setToolTip(data['name'])
+            detail=f'{int(percent)}% · {pages:,}{unit}'
+            full=f'{int(percent)}% · {action} {done:,}/{total:,}파일 · {pages:,}{unit}'
+            if data.get('frames',0)>1:full+=f' · TIFF {data["frame"]}/{data["frames"]}쪽'
+        if data.get('errors'):
+            detail+=f' · 오류 {data["errors"]}';full+=f' · 오류 {data["errors"]}'
+        self.set_detail(detail,full)
 
     def stopping(self):
-        self.cancel.setEnabled(False);self.detail.setText('읽기 중단 중 · 임시파일 확인')
+        self.hide_timer.stop();self._finished_at=None
+        self.cancel.setEnabled(False);self.set_detail('중단 중…','읽기 중단 중 · 임시파일 확인')
 
     def finish(self,pages,cancelled=False,errors=0,unit='쪽'):
+        if not self._active or self._finished_at is not None:return
         self.cancel.hide();self.bar.setRange(0,1000)
         if not cancelled and not errors:self.bar.setValue(1000)
-        self.detail.setText((f'읽기 취소 · {pages:,}{unit} 유지' if cancelled else
-                            (f'목록 확인 종료 · {pages:,}{unit}' if errors else f'100% · 목록 확인 완료 · {pages:,}{unit}'))+
-                            (f' · 오류 {errors:,}개' if errors else ''))
-        self.hide_timer.start(4500)
-
+        elif self.bar.value()<0:self.bar.setValue(0)
+        if cancelled:
+            detail=f'취소 · {pages:,}{unit}';full=f'읽기 취소 · {pages:,}{unit} 유지'
+        elif errors:
+            detail=f'오류 {errors:,} · {pages:,}{unit}'
+            full=f'목록 확인 종료 · {pages:,}{unit} · 오류 {errors:,}개'
+        else:
+            detail=f'100% · 완료 · {pages:,}{unit}';full=f'100% · 목록 확인 완료 · {pages:,}{unit}'
+        # 완료 안내가 떠 있는 동안에도 아래 썸네일 선택/드래그를 가로채지 않는다.
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents,True)
+        self._finished_at=time.monotonic();self.set_detail(detail,full);self.schedule_hide()
 
 class Window(QMainWindow):
     translationChanged=Signal()
@@ -7818,6 +7915,8 @@ class Window(QMainWindow):
         self.single_file_layout=False
         fit_document_window(self,False)
         self.settings = QSettings('KRS','PDFMagnet')
+        self.import_status_seconds=ImportProgress.normalize_seconds(
+            self.settings.value(ImportProgress.SETTING_KEY,ImportProgress.DEFAULT_SECONDS))
         self.keys=ShortcutBindings(self,self.settings)
         self.card_size = int(self.settings.value('size',180))
         self.repulsion = int(self.settings.value('repulsion',27))
@@ -7914,7 +8013,9 @@ class Window(QMainWindow):
         self.setAcceptDrops(True)
         self.actions=CornerActions(self.content,self,self.save_revision,self.translate_current,self.choose_hangul,self.show_settings,self.clear,
                                    right_inset=self.thumbnail_rail.width())
-        self.import_progress=ImportProgress(self.content);self.import_progress.cancelled.connect(self.cancel_import)
+        self.import_progress=ImportProgress(self.content,self.canvas,self.import_status_seconds)
+        self.import_progress.cancelled.connect(self.cancel_import)
+        self.splitter.splitterMoved.connect(lambda _pos,_index:self.place_actions())
         self.clear_button=self.actions.clear_button;self.clear_button.setEnabled(False)
         self.save_button=self.actions.save_button;self.options_button=self.actions.options_button
         self.translate_button=self.actions.translate_button;self.translate_button.setEnabled(False)
@@ -8460,8 +8561,8 @@ class Window(QMainWindow):
         self.import_cancelling=False;self.last_import_errors=0
         self.import_progress.finish(len(self.pages),cancelled=True,
                                     unit='항목' if any(p.is_document_card for p in self.pages) else '쪽')
-        if self.cleanup_failures:self.import_progress.detail.setText(self.import_progress.detail.text()+
-            f' · 임시파일 {len(self.cleanup_failures)}개 정리 보류')
+        if self.cleanup_failures:self.import_progress.add_note(
+            f'임시파일 {len(self.cleanup_failures)}개 정리 보류')
         self.update_action_states()
         if self.close_after_import:
             self.close_after_import=False;QTimer.singleShot(0,self.close)
@@ -8658,7 +8759,7 @@ class Window(QMainWindow):
         self.backend.jobs.clear();self.requested.clear();self.thumbs.clear();self.thumb_errors.clear()
         self.image_backend.cancel_pending(release=True)
         self.clear_pending=False
-        self.import_progress.hide_timer.stop();self.import_progress.hide()
+        self.import_progress.dismiss()
         self.refresh()
         self.canvas.verticalScrollBar().setValue(0);self.focus_content()
         # Close cached Windows PDF handles before unlinking working files.
@@ -9122,6 +9223,12 @@ class Window(QMainWindow):
         try:return normalize_github_repository(self.settings.value('github_repository_url',PROJECT_GITHUB_URL,type=str))
         except ValueError:return ''
 
+    def set_import_status_seconds(self,value):
+        self.import_status_seconds=ImportProgress.normalize_seconds(value)
+        self.import_progress.set_display_seconds(self.import_status_seconds)
+        self.settings.setValue(ImportProgress.SETTING_KEY,self.import_status_seconds)
+        self.settings.sync()
+
     def show_settings(self, parent=None, tab='general'):
         dialog = QDialog(parent if isinstance(parent,QWidget) else self);dialog.setWindowTitle('옵션');dialog.resize(760,690)
         dialog.setWindowIcon(corner_icon('options'))
@@ -9135,7 +9242,19 @@ class Window(QMainWindow):
         numbers = QCheckBox();numbers.setChecked(self.show_numbers)
         rename = QCheckBox();rename.setChecked(self.rename_after)
         mode = QComboBox();mode.addItems(['선택 페이지를 한 PDF로','페이지별 PDF로']);mode.setCurrentIndex(int(self.separate))
-        form.addRow('썸네일 크기',size);form.addRow('자석 반발 강도',force)
+        form.addRow('썸네일 크기',size)
+        status_seconds=QDoubleSpinBox();status_seconds.setObjectName('import_status_seconds')
+        status_seconds.setDecimals(1);status_seconds.setRange(0.1,2.0)
+        status_seconds.setSingleStep(0.1);status_seconds.setSuffix(' 초')
+        status_seconds.setKeyboardTracking(False);status_seconds.setValue(self.import_status_seconds)
+        status_seconds.setToolTip('썸네일 쪽의 완료 안내를 숨기기까지의 시간입니다. 읽는 도중에는 계속 표시합니다.')
+        status_seconds.valueChanged.connect(self.set_import_status_seconds)
+        status_row=QHBoxLayout();status_row.addWidget(status_seconds)
+        status_note=QLabel('0.1~2.0초 · 완료 후 자동 숨김')
+        status_note.setStyleSheet('color:#888;font-size:11px;')
+        status_row.addWidget(status_note);status_row.addStretch()
+        form.addRow('완료 안내 표시시간',status_row)
+        form.addRow('자석 반발 강도',force)
         form.addRow('움직임 / 선택 테두리 애니메이션',animation)
         form.addRow('어두운 배경',dark);form.addRow('쪽수 표시',numbers)
         form.addRow('밖으로 복사한 뒤 이름 입력',rename);form.addRow('사본 구성',mode)
@@ -9213,6 +9332,7 @@ class Window(QMainWindow):
             self.dark = dark.isChecked();self.show_numbers = numbers.isChecked()
             self.rename_after = rename.isChecked();self.separate = bool(mode.currentIndex())
             self.canvas.layout_pages();self.empty_preview.update();self.thumbnail_rail.sync()
+            self.import_progress.place()
             if self.preview_dialog is not None and not self.preview_dialog.closed:
                 self.preview_dialog.view.setBackgroundBrush(QColor('#181b24' if self.dark else '#edf0f5'))
         for control in (size,force):control.valueChanged.connect(apply)
@@ -9250,7 +9370,7 @@ class Window(QMainWindow):
             QMessageBox.warning(self,'바탕화면 아이콘',str(exc))
 
     def save_settings(self):
-        for key,value in {'size':self.card_size,'repulsion':self.repulsion,'animate':self.animate,'dark':self.dark,'numbers':self.show_numbers,'rename':self.rename_after,'separate':self.separate,'auto_preview':self.auto_preview,'image_engine':self.image_engine}.items():
+        for key,value in {'size':self.card_size,'repulsion':self.repulsion,'animate':self.animate,'dark':self.dark,'numbers':self.show_numbers,'rename':self.rename_after,'separate':self.separate,'auto_preview':self.auto_preview,'image_engine':self.image_engine,ImportProgress.SETTING_KEY:self.import_status_seconds}.items():
             self.settings.setValue(key,value)
 
     def closeEvent(self,event):
@@ -9276,6 +9396,7 @@ class Window(QMainWindow):
             if choice == QMessageBox.StandardButton.Save and not self.save_revision():
                 event.ignore(); return
         self.closing=True;self.replacement_paths=None;self.navigation_request=None
+        self.import_progress.dismiss()
         if self.preview_dialog is not None:
             self.preview_dialog.close()
         self.clear_timer.stop();self.clear_pending=False
