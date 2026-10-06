@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""The Viewer (정) 3.13.11 — PDFium 기반 / LGPL Qt 배포 구성.
+"""The Viewer (정) 3.13.30 — PDFium 기반 / LGPL Qt 배포 구성.
 PDF·그림·ZIP/CBZ·텍스트·PSD·DXF·HWP/HWPX를 읽고 페이지를 검토합니다.
 Office 문서는 동봉 또는 설치된 LibreOffice가 있는 경우 PDF로 변환합니다.
 DWG·AI·EPS·PS 변환은 이 빌드에서 제외했습니다.
@@ -11,7 +11,7 @@ PDF 읽기는 pypdfium2/PDFium, 페이지 조작은 pypdf, UI·텍스트 생성�
 Qt의 고지·소스·라이선스는 빌드 패키지의 licenses 및 OpenSource_Sources에 있습니다.
 """
 import sys
-_VIEWER_PDF_EDIT_SOURCE = '"""PDF editing with PDFium, pypdf, ReportLab and LGPL Qt only.\n\nText moves/deletions split original glyph runs without regenerating the page.\nAmbiguous selections, partial glyphs and shared Forms are refused. Added text,\nimages and white rectangles have independently selectable marked layers.\n"""\nimport ctypes\nimport io\nimport math\nimport re\nfrom types import SimpleNamespace\n\n\ndef _geometry():\n    from viewer_pdf_engine import Rect, Point, Matrix\n    return Rect, Point, Matrix\n\n\ndef _merge_bytes(page, data, overlay=True):\n    from pypdf import PdfReader\n    layer = PdfReader(io.BytesIO(data)).pages[0]\n    page._pdfpage.merge_page(layer, over=bool(overlay), expand=False)\n    page._doc._changed()\n\n\ndef _canvas_layer(page, draw, overlay=True):\n    from reportlab.pdfgen import canvas\n    buffer = io.BytesIO()\n    c = canvas.Canvas(buffer, pagesize=(page.rect.width, page.rect.height),\n                      pageCompression=1)\n    draw(c)\n    c.showPage()\n    c.save()\n    # Imported layer uses the displayed crop\'s coordinate system.\n    page.show_pdf_page(page.rect, SimpleNamespace(tobytes=lambda **kw: buffer.getvalue()),\n                       0, overlay=overlay, keep_proportion=False)\n\n\ndef show_pdf_page(self, rect, source, pno=0, *, overlay=True, keep_proportion=True,\n                  rotate=0, clip=None, **kwargs):\n    """Place a vector PDF page, clipping its visible crop before transformation."""\n    from pypdf import PdfReader, PdfWriter, Transformation\n    from pypdf.generic import RectangleObject\n    Rect, Point, Matrix = _geometry()\n    target = Rect(rect)\n    if target.is_empty:\n        raise ValueError(\'PDF를 배치할 영역이 없습니다.\')\n    reader = PdfReader(io.BytesIO(source.tobytes()))\n    temporary = PdfWriter()\n    layer = temporary.add_page(reader.pages[int(pno)])\n    # Flatten /Rotate into content and boxes on this temporary source only.\n    if layer.rotation:\n        layer.transfer_rotation_to_content()\n    original_crop, media = layer.cropbox, layer.mediabox\n    crop = RectangleObject((max(float(original_crop.left), float(media.left)),\n                            max(float(original_crop.bottom), float(media.bottom)),\n                            min(float(original_crop.right), float(media.right)),\n                            min(float(original_crop.top), float(media.top))))\n    width, height = float(crop.width), float(crop.height)\n    visible = Rect(0, 0, width, height)\n    area = visible if clip is None else (Rect(clip) & visible)\n    if area.is_empty:\n        return 0\n    sx0, sx1 = float(crop.left)+area.x0, float(crop.left)+area.x1\n    sy0, sy1 = float(crop.top)-area.y1, float(crop.top)-area.y0\n    layer.cropbox = RectangleObject((sx0, sy0, sx1, sy1))\n    angle = math.radians(float(rotate) % 360)\n    cosine, sine = math.cos(angle), math.sin(angle)\n    corners = [(cosine*x-sine*y, sine*x+cosine*y)\n               for x in (sx0, sx1) for y in (sy0, sy1)]\n    minimum_x, maximum_x = min(p[0] for p in corners), max(p[0] for p in corners)\n    minimum_y, maximum_y = min(p[1] for p in corners), max(p[1] for p in corners)\n    scale_x = target.width/(maximum_x-minimum_x)\n    scale_y = target.height/(maximum_y-minimum_y)\n    if keep_proportion:\n        scale_x = scale_y = min(scale_x, scale_y)\n    rendered_width = (maximum_x-minimum_x)*scale_x\n    rendered_height = (maximum_y-minimum_y)*scale_y\n    # Destination coordinates are crop-relative, top left; PDF coordinates are\n    # bottom left. The target is currently unrotated in editing/print composition.\n    raw_target = target * ~self.transformation_matrix\n    if self.rotation:\n        raise ValueError(\'회전 페이지는 먼저 표시 방향을 적용한 뒤 배치하세요.\')\n    offset_x = raw_target.x0+(target.width-rendered_width)/2-minimum_x*scale_x\n    offset_y = raw_target.y0+(target.height-rendered_height)/2-minimum_y*scale_y\n    transform = (cosine*scale_x, sine*scale_y, -sine*scale_x,\n                 cosine*scale_y, offset_x, offset_y)\n    self._pdfpage.merge_transformed_page(layer, Transformation(transform),\n                                        over=bool(overlay), expand=False)\n    self._doc._changed()\n    return 1\n\n\ndef remove_rotation(self):\n    if self.rotation:\n        self._pdfpage.transfer_rotation_to_content()\n        self._doc._changed()\n    return None\n\n\ndef insert_image(self, rect, *, filename=None, stream=None, pixmap=None, keep_proportion=True,\n                 overlay=True, **kwargs):\n    from reportlab.lib.utils import ImageReader\n    Rect, Point, Matrix = _geometry()\n    area = Rect(rect)\n    if area.is_empty:\n        raise ValueError(\'그림 영역이 없습니다.\')\n    if pixmap is not None:\n        stream = pixmap.tobytes(\'png\')\n    image = ImageReader(io.BytesIO(stream) if stream is not None else str(filename))\n    image_width, image_height = image.getSize()\n    width, height = area.width, area.height\n    if keep_proportion:\n        ratio = min(width/image_width, height/image_height)\n        width, height = image_width*ratio, image_height*ratio\n    x = area.x0+(area.width-width)/2\n    y = self.rect.height-area.y1+(area.height-height)/2\n    def draw(c):\n        c.drawImage(image, x, y, width=width, height=height, mask=\'auto\')\n    _canvas_layer(self, draw, overlay)\n    return 1\n\n\ndef draw_rect(self, rect, *, color=(0, 0, 0), fill=None, width=1,\n              fill_opacity=1, stroke_opacity=1, overlay=True, **kwargs):\n    Rect, Point, Matrix = _geometry()\n    area = Rect(rect)\n    def draw(c):\n        c.setLineWidth(float(width))\n        if color is not None:\n            c.setStrokeColorRGB(*color)\n            c.setStrokeAlpha(float(stroke_opacity))\n        if fill is not None:\n            c.setFillColorRGB(*fill)\n            c.setFillAlpha(float(fill_opacity))\n        c.rect(area.x0, self.rect.height-area.y1, area.width, area.height,\n               stroke=int(color is not None), fill=int(fill is not None))\n    _canvas_layer(self, draw, overlay)\n    return area\n\n\ndef draw_line(self, p1, p2, *, color=(0, 0, 0), width=1, overlay=True, **kwargs):\n    Rect, Point, Matrix = _geometry()\n    a, b = Point(p1), Point(p2)\n    def draw(c):\n        c.setStrokeColorRGB(*color)\n        c.setLineWidth(float(width))\n        c.line(a.x, self.rect.height-a.y, b.x, self.rect.height-b.y)\n    _canvas_layer(self, draw, overlay)\n\n\nclass Shape:\n    def __init__(self, page):\n        self.page = page\n        self.lines = []\n        self.options = {}\n\n    def draw_line(self, a, b):\n        self.lines.append((tuple(a), tuple(b)))\n        return b\n\n    def finish(self, **kwargs):\n        self.options.update(kwargs)\n\n    def commit(self, overlay=True):\n        options = self.options\n        def draw(c):\n            c.setStrokeColorRGB(*options.get(\'color\', (0, 0, 0)))\n            c.setLineWidth(float(options.get(\'width\', 1)))\n            path = c.beginPath()\n            for a, b in self.lines:\n                path.moveTo(a[0], self.page.rect.height-a[1])\n                path.lineTo(b[0], self.page.rect.height-b[1])\n            c.drawPath(path, stroke=1, fill=0)\n        _canvas_layer(self.page, draw, overlay)\n\n\ndef insert_text(self, point, text, *, fontsize=11, color=(0, 0, 0),\n                fontname=\'helv\', rotate=0, overlay=True, **kwargs):\n    from viewer_pdf_engine import Font\n    font = Font(fontname)\n    writer = TextWriter(self.rect)\n    writer.append(point, text, font=font, fontsize=fontsize)\n    writer.write_text(self, color=color, overlay=overlay, rotate=rotate)\n    return str(text).count(\'\\n\')+1\n\n\nclass TextWriter:\n    def __init__(self, rect):\n        self.rect = rect\n        self.items = []\n\n    def append(self, pos, text, *, font=None, fontsize=11, **kwargs):\n        self.items.append((tuple(pos), str(text), font, float(fontsize)))\n        return None\n\n    def write_text(self, page, *, color=(0, 0, 0), overlay=True, rotate=0, **kwargs):\n        from viewer_pdf_engine import Font\n        def draw(c):\n            c.setFillColorRGB(*color)\n            for pos, value, font, fontsize in self.items:\n                actual_font = font or Font(\'helv\')\n                name = getattr(actual_font, \'reportlab_name\', \'Helvetica\')\n                c.saveState()\n                c.translate(pos[0], page.rect.height-pos[1])\n                c.rotate(float(rotate))\n                c.setFont(name, fontsize)\n                for index, line in enumerate(value.split(\'\\n\')):\n                    c.drawString(0, -index*fontsize*1.2, line)\n                c.restoreState()\n        _canvas_layer(page, draw, overlay)\n\n\n_qt_app = None\n\n\ndef _qt_document_pdf(content, css, width, height, scale_low):\n    """Use Qt\'s text layout/fonts; output real, embedded/selectable PDF text."""\n    import os\n    from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QMarginsF, QRectF, QSizeF\n    from PySide6.QtGui import QPageSize, QPainter, QPdfWriter, QTextDocument\n    from PySide6.QtWidgets import QApplication\n    global _qt_app\n    if QApplication.instance() is None:\n        # No window is created; editing subprocesses have no UI event loop.\n        if os.name != \'nt\':\n            os.environ.setdefault(\'QT_QPA_PLATFORM\', \'offscreen\')\n        _qt_app = QApplication([])\n    data = QByteArray()\n    buffer = QBuffer(data)\n    buffer.open(QIODevice.OpenModeFlag.WriteOnly)\n    writer = QPdfWriter(buffer)\n    writer.setResolution(720)\n    writer.setPageSize(QPageSize(QSizeF(width, height), QPageSize.Unit.Point,\n                                \'Viewer text\'))\n    writer.setPageMargins(QMarginsF(0, 0, 0, 0))\n    document = QTextDocument()\n    # Measure at 720 DPI so half/fractional points are not rounded to whole\n    # pixels. PDF painting uses the same device; 10 layout pixels = 1 point.\n    document.documentLayout().setPaintDevice(writer)\n    document.setDocumentMargin(0)\n    document.setDefaultStyleSheet(css or \'\')\n    document.setHtml(content)\n    minimum = max(.01, min(1., float(scale_low)))\n    def measured(scale):\n        document.setTextWidth(width*10/scale)\n        return document.size().height()*scale/10\n    if measured(1.) <= height+.01:\n        scale = 1.\n    elif measured(minimum) > height+.01:\n        buffer.close()\n        return None, -1, minimum\n    else:\n        low, high = minimum, 1.\n        for _ in range(22):\n            middle = (low+high)/2\n            if measured(middle) <= height+.01:\n                low = middle\n            else:\n                high = middle\n        scale = low\n    used = measured(scale)\n    painter = QPainter(writer)\n    if not painter.isActive():\n        raise ValueError(\'PDF 글자 출력 장치를 만들 수 없습니다.\')\n    painter.scale(scale, scale)\n    document.drawContents(painter, QRectF(0, 0, width*10/scale, height*10/scale))\n    painter.end()\n    buffer.close()\n    # Qt rounds a custom page\'s MediaBox to whole points. Restore its exact\n    # requested dimensions and top-left anchor without stretching font glyphs.\n    from pypdf import PdfReader, PdfWriter, Transformation\n    from pypdf.generic import RectangleObject\n    reader=PdfReader(io.BytesIO(bytes(data)));page=reader.pages[0]\n    page.add_transformation(Transformation().translate(0,height-float(page.mediabox.height)))\n    page.mediabox=RectangleObject((0,0,width,height));page.cropbox=RectangleObject((0,0,width,height))\n    output=io.BytesIO();pdf=PdfWriter();pdf.add_page(page);pdf.write(output)\n    return output.getvalue(), max(0., height-used), scale\n\n\ndef insert_htmlbox(self, rect, text, *, css=None, scale_low=0, rotate=0,\n                   overlay=True, **kwargs):\n    Rect, Point, Matrix = _geometry()\n    target = Rect(rect)\n    turn = int(rotate) % 360\n    if turn % 90:\n        raise ValueError(\'글자 회전은 90도 단위로 지정하세요.\')\n    width, height = (target.height, target.width) if turn in (90, 270) else (target.width, target.height)\n    if width <= 0 or height <= 0:\n        return -1, 1\n    data, spare, scale = _qt_document_pdf(str(text), css, width, height, scale_low)\n    if data is not None:\n        source = SimpleNamespace(tobytes=lambda **kw: data)\n        self.show_pdf_page(target, source, 0, rotate=turn,\n                           overlay=overlay, keep_proportion=False)\n    return spare, scale\n\n\ndef insert_textbox(self, rect, text, *, fontsize=11, color=(0, 0, 0),\n                   fontname=\'helv\', align=0, rotate=0, **kwargs):\n    import html\n    alignment = {0:\'left\', 1:\'center\', 2:\'right\', 3:\'justify\'}.get(align, \'left\')\n    rgb = \'#\'+\'\'.join(f\'{max(0,min(255,round(float(v)*255))):02x}\' for v in color)\n    css = f\'p {{ margin:0; font-size:{float(fontsize)}pt; color:{rgb}; text-align:{alignment}; }}\'\n    spare, scale = self.insert_htmlbox(rect, \'<p>\'+html.escape(str(text)).replace(\'\\n\',\'<br>\')+\'</p>\',\n                                     css=css, scale_low=1, rotate=rotate, **kwargs)\n    return spare\n\n\ndef annots(self):\n    for entry in self._pdfpage.get(\'/Annots\', []):\n        obj = entry.get_object()\n        if obj.get(\'/Subtype\') == \'/Widget\':\n            continue\n        kind = 12 if obj.get(\'/Subtype\') == \'/Redact\' else -1\n        yield SimpleNamespace(type=(kind, str(obj.get(\'/Subtype\', \'\'))), _entry=entry)\n\n\ndef widgets(self):\n    for entry in self._pdfpage.get(\'/Annots\', []):\n        if entry.get_object().get(\'/Subtype\') == \'/Widget\':\n            yield SimpleNamespace(_entry=entry)\n\n\ndef delete_annot(self, annotation):\n    from pypdf.generic import NameObject, ArrayObject\n    values = self._pdfpage.get(\'/Annots\', [])\n    selected = getattr(annotation, \'_entry\', annotation)\n    self._pdfpage[NameObject(\'/Annots\')] = ArrayObject([x for x in values if x != selected])\n    self._doc._changed()\n\n\ndef add_redact_annot(self, rect, *, fill=False, cross_out=False, **kwargs):\n    Rect, Point, Matrix = _geometry()\n    if not hasattr(self, \'_redactions\'):\n        self._redactions = []\n    self._redactions.append((Rect(rect), fill))\n    return SimpleNamespace(type=(12, \'Redact\'), rect=Rect(rect))\n\n\ndef _object_address(raw):\n    return ctypes.cast(raw, ctypes.c_void_p).value if raw else None\n\n\ndef _text_objects(pdf_page, matrix):\n    """Map PDFium chars to actual text objects, using page-space char bounds.\n\n    PDFium object bounds inside a Form are local; char bounds avoid that trap.\n    """\n    import pypdfium2.raw as raw\n    Rect, Point, Matrix = _geometry()\n    groups = {}\n    text_page = pdf_page.get_textpage()\n    try:\n        for index in range(text_page.count_chars()):\n            handle = raw.FPDFText_GetTextObject(text_page, index)\n            identity = _object_address(handle)\n            codepoint = raw.FPDFText_GetUnicode(text_page, index)\n            if identity is None or not codepoint:\n                continue\n            item = groups.setdefault(identity, {\'characters\': [], \'rectangles\': []})\n            character = chr(codepoint)\n            item[\'characters\'].append(character)\n            if not character.isspace():\n                left, bottom, right, top = text_page.get_charbox(index)\n                box = Rect(left, bottom, right, top)*matrix\n                if not box.is_empty:\n                    item[\'rectangles\'].append(box)\n    finally:\n        text_page.close()\n    return groups\n\n\ndef _adopt_pdfium(document, pdf):\n    from pypdf import PdfReader, PdfWriter\n    output = io.BytesIO()\n    pdf.save(output)\n    writer = PdfWriter()\n    writer.clone_document_from_reader(PdfReader(io.BytesIO(output.getvalue())))\n    # Clone reachable PDF objects only, never append an incremental revision.\n    if hasattr(writer, \'compress_identical_objects\'):\n        try:\n            writer.compress_identical_objects(remove_duplicates=True, remove_unreferenced=True)\n        except TypeError:  # pypdf versions before the option names changed.\n            writer.compress_identical_objects(remove_identicals=True, remove_orphans=True)\n    document._writer = writer\n    document._changed()\n\n\ndef _edit_objects(page, areas, *, text=0, images=0, graphics=0,\n                  movement=None, expected_text=None):\n    from viewer_pdf_engine import PDFIUM_LOCK\n    with PDFIUM_LOCK:\n        return _edit_objects_locked(page, areas, text=text, images=images,\n                                    graphics=graphics, movement=movement,\n                                    expected_text=expected_text)\n\n\ndef _edit_objects_locked(page, areas, *, text=0, images=0, graphics=0,\n                         movement=None, expected_text=None):\n    import pypdfium2 as pdfium\n    import pypdfium2.raw as raw\n    Rect, Point, Matrix = _geometry()\n    pdf = pdfium.PdfDocument(page._doc.tobytes())\n    pdf_page = pdf[int(page._number)]\n    selected = []\n    try:\n        mapping = _text_objects(pdf_page, page.transformation_matrix)\n        selected_text = []\n        for obj in pdf_page.get_objects():\n            if obj.type == raw.FPDF_PAGEOBJ_TEXT:\n                if int(text) == 1:\n                    continue\n                info = mapping.get(_object_address(obj.raw), {})\n                boxes = info.get(\'rectangles\', [])\n                if not boxes:\n                    continue\n                touching = [any((box & area).get_area() > .0001 for area in areas) for box in boxes]\n                if not any(touching):\n                    continue\n                completely_covered = all(any((area+(-.12,-.12,.12,.12)).contains(box)\n                                            for area in areas) for box in boxes)\n                if not completely_covered:\n                    raise ValueError(\'선택 영역이 하나의 PDF 글자 객체 일부에 걸칩니다. 글자 객체 전체를 선택하세요. 원본은 변경되지 않았습니다.\')\n                if obj.level:\n                    raise ValueError(\'공유된 PDF Form 내부 글자는 개별 삭제·이동할 수 없습니다. 흰색 덮기 또는 새 글자 넣기를 사용하세요. 원본은 변경되지 않았습니다.\')\n                selected.append(obj)\n                selected_text.extend(info.get(\'characters\', []))\n            elif movement is None and ((obj.type == raw.FPDF_PAGEOBJ_IMAGE and int(images) != 0)\n                                        or (obj.type == raw.FPDF_PAGEOBJ_PATH and int(graphics) != 0)):\n                left, bottom, right, top = obj.get_bounds()\n                box = Rect(left, bottom, right, top)*page.transformation_matrix\n                if any((box & area).get_area() > .0001 for area in areas):\n                    if obj.level:\n                        raise ValueError(\'공유 Form 그림·선을 개별 삭제할 수 없습니다.\')\n                    selected.append(obj)\n        if expected_text is not None:\n            compact = lambda value: \'\'.join(str(value).split())\n            if compact(\'\'.join(selected_text)) != compact(expected_text):\n                raise ValueError(\'선택한 글자가 변경되었거나 다른 글자와 겹칩니다. 다시 선택하세요.\')\n        for obj in selected:\n            if movement is None:\n                pdf_page.remove_obj(obj)\n                obj.close()\n            else:\n                dx, dy = movement\n                inverse = ~page.transformation_matrix\n                origin = Point(0, 0)*inverse\n                shifted = Point(dx, dy)*inverse\n                obj.set_matrix(obj.get_matrix().translate(shifted.x-origin.x, shifted.y-origin.y))\n        if selected:\n            pdf_page.gen_content()\n            pdf_page.close()\n            _adopt_pdfium(page._doc, pdf)\n        return len(selected)\n    finally:\n        pdf_page.close()\n        pdf.close()\n\n\ndef apply_redactions(self, *, images=2, graphics=1, text=0, **kwargs):\n    queued = list(getattr(self, \'_redactions\', []))\n    if not queued:\n        return False\n    if not images and not graphics:\n        if int(text) != 1:\n            _edit_text_stream(self, [area for area, fill in queued])\n    else:\n        _edit_objects(self, [area for area, fill in queued], text=text,\n                      images=images, graphics=graphics)\n    self._redactions = []\n    for area, fill in queued:\n        if fill is not False and fill is not None:\n            self.draw_rect(area, color=None, fill=fill, overlay=True)\n    return True\n\n\n_TEXT_SHOW = frozenset((b\'Tj\', b\'TJ\', b"\'", b\'"\'))\n\n\ndef _encoded_text(value):\n    from pypdf.generic import ByteStringObject, TextStringObject\n    if isinstance(value, ByteStringObject):\n        return bytes(value)\n    if isinstance(value, TextStringObject):\n        return value.original_bytes\n    return None\n\n\ndef _font_code_size(font):\n    """Do not guess boundaries in a variable-length/vertical character encoding."""\n    font = font.get_object()\n    if font.get(\'/Subtype\') == \'/Type3\':\n        raise ValueError(\'Type3 글꼴은 원본 배치를 보존하는 개별 글자 편집을 지원하지 않습니다.\')\n    if font.get(\'/Subtype\') != \'/Type0\':\n        return 1\n    if font.get(\'/Encoding\') == \'/Identity-H\':\n        return 2\n    raise ValueError(\'이 PDF 글꼴의 문자 경계를 확정할 수 없습니다. 원본은 변경되지 않았습니다.\')\n\n\ndef _tagged_text_snapshot(data, number, operations, matrix):\n    """Use disposable marked content to map glyphs to original show operators.\n\n    Only this inspection copy carries the tags. No PDFium content regeneration\n    is used for the edited page, so original TJ spacing and graphics survive.\n    """\n    from pypdf import PdfReader, PdfWriter\n    from pypdf.generic import DictionaryObject, NameObject, NumberObject\n    import pypdfium2 as pdfium\n    import pypdfium2.raw as raw\n    Rect, Point, Matrix = _geometry()\n    writer = PdfWriter()\n    writer.clone_document_from_reader(PdfReader(io.BytesIO(data)))\n    target = writer.pages[number]\n    content = target.get_contents()\n    tagged = []\n    for index, (args, operator) in enumerate(operations):\n        if operator in _TEXT_SHOW:\n            tagged.extend([([NameObject(\'/TheViewerInspect\'), DictionaryObject({\n                NameObject(\'/TVTextOp\'): NumberObject(index)})], b\'BDC\'),\n                (args, operator), ([], b\'EMC\')])\n        else:\n            tagged.append((args, operator))\n    content.operations = tagged\n    target.replace_contents(content)\n    output = io.BytesIO()\n    writer.write(output)\n    groups, unmarked = {}, []\n    with pdfium.PdfDocument(output.getvalue()) as document:\n        pdf_page = document[number]\n        text_page = pdf_page.get_textpage()\n        try:\n            for index in range(text_page.count_chars()):\n                if raw.FPDFText_IsGenerated(text_page, index):\n                    continue\n                obj = raw.FPDFText_GetTextObject(text_page, index)\n                if not obj:\n                    continue\n                op_index = None\n                for mark_index in range(raw.FPDFPageObj_CountMarks(obj)):\n                    mark = raw.FPDFPageObj_GetMark(obj, mark_index)\n                    value = ctypes.c_int()\n                    if raw.FPDFPageObjMark_GetParamIntValue(mark, b\'TVTextOp\', ctypes.byref(value)):\n                        op_index = value.value\n                code = raw.FPDFText_GetUnicode(text_page, index)\n                left, bottom, right, top = text_page.get_charbox(index)\n                box = Rect(left, bottom, right, top)*matrix\n                x, y = ctypes.c_double(), ctypes.c_double()\n                if not raw.FPDFText_GetCharOrigin(text_page, index, ctypes.byref(x), ctypes.byref(y)):\n                    raise ValueError(\'글자의 원래 위치를 확인하지 못했습니다.\')\n                item = {\'text\': chr(code) if code else \'\', \'box\': box,\n                        \'origin\': Point(x.value, y.value)*matrix}\n                if op_index is None:\n                    unmarked.append(item)\n                    continue\n                group = groups.setdefault(op_index, {\'chars\': [], \'widths\': {}})\n                group[\'chars\'].append(item)\n                # Font handles are only used while the inspection PDF is open.\n                group[\'font\'] = raw.FPDFTextObj_GetFont(obj)\n            # PDFium\'s glyph-width API accepts Unicode, not the encoded CID.\n            # This is a fallback for simple fonts without a /Widths table;\n            # Identity-H CID widths are read directly from /W and /DW below.\n            for op_index, group in groups.items():\n                for item in group[\'chars\']:\n                    code = ord(item[\'text\']) if item[\'text\'] else 0\n                    if not code or code in group[\'widths\']:continue\n                    width = ctypes.c_float()\n                    if raw.FPDFFont_GetGlyphWidth(group[\'font\'], code, 1000., ctypes.byref(width)):\n                        group[\'widths\'][code] = float(width.value)\n                group.pop(\'font\', None)\n        finally:\n            text_page.close()\n            pdf_page.close()\n    return groups, unmarked\n\n\ndef _font_width_table(font):\n    """Read advances by original character code, including both /W syntaxes."""\n    font = font.get_object()\n    step = _font_code_size(font)\n    if step == 1:\n        first = int(font.get(\'/FirstChar\', 0))\n        widths = {first+i:float(width) for i,width in enumerate(font.get(\'/Widths\', []))}\n        return step, widths, None\n    descendant = font[\'/DescendantFonts\'][0].get_object()\n    values = descendant.get(\'/W\', [])\n    if hasattr(values, \'get_object\'):values = values.get_object()\n    widths, i = {}, 0\n    while i < len(values):\n        first = int(values[i]);value = values[i+1];i += 2\n        if hasattr(value, \'get_object\'):value = value.get_object()\n        if isinstance(value, (list, tuple)):\n            widths.update((first+j, float(width)) for j,width in enumerate(value))\n        else:\n            last = int(value);width = float(values[i]);i += 1\n            if last < first or last-first > 65535:\n                raise ValueError(\'PDF 글꼴 너비 테이블이 올바르지 않습니다.\')\n            widths.update((code,width) for code in range(first,last+1))\n    return step, widths, float(descendant.get(\'/DW\', 1000))\n\n\ndef _text_stream_runs(pdfpage, operations, snapshots):\n    """Track text and line matrices separately, including TJ\'s cursor advance."""\n    from pypdf.generic import ByteStringObject\n    Rect, Point, Matrix = _geometry()\n    resolve = lambda value:value.get_object() if hasattr(value, \'get_object\') else value\n    resources = resolve(pdfpage.get(\'/Resources\', {}))\n    fonts = resolve(resources.get(\'/Font\', {}))\n    font_tables = {}\n    state = {\'ctm\': Matrix(), \'font\': None, \'size\': 0., \'scale\': 1.,\n             \'charspace\': 0., \'wordspace\': 0., \'leading\': 0., \'render\': 0,\'rise\':0.}\n    stack, runs = [], {}\n    text_matrix = line_matrix = Matrix()\n    active = False\n    for index, (args, op) in enumerate(operations):\n        if op == b\'q\':\n            stack.append(state.copy())\n        elif op == b\'Q\':\n            if not stack:\n                raise ValueError(\'PDF 그래픽 상태의 경계를 확인하지 못했습니다.\')\n            state = stack.pop()\n        elif op == b\'cm\':\n            state[\'ctm\'] = Matrix(*map(float, args))*state[\'ctm\']\n        elif op == b\'BT\':\n            text_matrix = line_matrix = Matrix(); active = True\n        elif op == b\'ET\':\n            active = False\n        elif op == b\'Tf\':\n            state[\'font\'], state[\'size\'] = args[0], float(args[1])\n        elif op in (b\'Tc\', b\'Tw\', b\'TL\', b\'Tz\', b\'Tr\',b\'Ts\'):\n            key = {b\'Tc\':\'charspace\', b\'Tw\':\'wordspace\', b\'TL\':\'leading\', b\'Tz\':\'scale\', b\'Tr\':\'render\',b\'Ts\':\'rise\'}[op]\n            state[key] = float(args[0])/(100. if op == b\'Tz\' else 1.)\n        elif op == b\'gs\':\n            ext = resolve(resolve(resources.get(\'/ExtGState\', {})).get(args[0], {}))\n            if \'/Font\' in ext:\n                state[\'font\'], state[\'size\'] = ext[\'/Font\'][0], float(ext[\'/Font\'][1])\n        elif op == b\'Tm\':\n            text_matrix = line_matrix = Matrix(*map(float, args))\n        elif op in (b\'Td\', b\'TD\'):\n            x, y = map(float, args)\n            if op == b\'TD\':state[\'leading\'] = -y\n            text_matrix = line_matrix = Matrix(1,0,0,1,x,y)*line_matrix\n        elif op == b\'T*\':\n            text_matrix = line_matrix = Matrix(1,0,0,1,0,-state[\'leading\'])*line_matrix\n        elif op in _TEXT_SHOW:\n            if not active:\n                raise ValueError(\'PDF 글자 연산의 경계를 확인하지 못했습니다.\')\n            prefix = []\n            if op == b\'"\':\n                state[\'wordspace\'], state[\'charspace\'] = float(args[0]), float(args[1])\n                prefix = [([args[0]], b\'Tw\'), ([args[1]], b\'Tc\')]\n            if op in (b"\'", b\'"\'):\n                text_matrix = line_matrix = Matrix(1,0,0,1,0,-state[\'leading\'])*line_matrix\n                prefix.append(([], b\'T*\'))\n            font = fonts.get(state[\'font\']) if isinstance(state[\'font\'], str) else state[\'font\']\n            if font is None:\n                raise ValueError(\'PDF의 원본 글꼴을 확인하지 못했습니다.\')\n            table_key = str(state[\'font\'])\n            if table_key not in font_tables:font_tables[table_key] = _font_width_table(font)\n            step, width_table, default_width = font_tables[table_key]\n            values = args[0] if op == b\'TJ\' else [args[-1]]\n            tokens, units = [], []\n            width_map = snapshots.get(index, {}).get(\'widths\', {})\n            for value in values:\n                encoded = _encoded_text(value)\n                if encoded is None:\n                    advance = -float(value)*state[\'size\']*state[\'scale\']/1000.\n                    tokens.append({\'value\':value, \'advance\':advance, \'unit\':None})\n                else:\n                    if len(encoded) % step:\n                        raise ValueError(\'PDF 글꼴 코드 경계가 불완전합니다.\')\n                    for start in range(0, len(encoded), step):\n                        code = int.from_bytes(encoded[start:start+step], \'big\')\n                        width = width_table.get(code, default_width)\n                        if width is None:\n                            chars = snapshots.get(index, {}).get(\'chars\', [])\n                            text = chars[len(units)][\'text\'] if len(units) < len(chars) else \'\'\n                            width = width_map.get(ord(text)) if text else None\n                        if width is None:\n                            raise ValueError(\'글자의 원래 너비를 확인하지 못했습니다. 원본은 변경되지 않았습니다.\')\n                        advance = (width*state[\'size\']/1000.+state[\'charspace\']+\n                                   (state[\'wordspace\'] if step == 1 and code == 32 else 0.))*state[\'scale\']\n                        token = {\'value\':ByteStringObject(encoded[start:start+step]),\n                                 \'advance\':advance, \'unit\':len(units)}\n                        units.append(token);tokens.append(token)\n            runs[index] = {\'state\':state.copy(), \'matrix\':text_matrix, \'line\':line_matrix,\n                           \'tokens\':tokens, \'units\':units, \'prefix\':prefix}\n            advance = sum(token[\'advance\'] for token in tokens)\n            text_matrix = Matrix(1,0,0,1,advance,0)*text_matrix\n            runs[index][\'end\'] = text_matrix\n    return runs\n\n\ndef _selected_glyphs(groups, unmarked, source_glyphs, covers):\n    """Resolve selected letters by their Unicode, baseline and tight bounds.\n\n    A neighbouring line can cross the span rectangle without belonging to it.\n    Never widen the rectangle or infer membership from its intersections.\n    """\n    Rect, Point, Matrix = _geometry()\n    tolerance=.0025;grid=.01;buckets={}\n    for op_index, group in list(groups.items())+[(None,{\'chars\':unmarked})]:\n        for position,item in enumerate(group[\'chars\']):\n            if not item[\'text\'].strip():continue\n            origin=item[\'origin\'];key=(item[\'text\'],round(origin.x/grid),round(origin.y/grid))\n            buckets.setdefault(key,[]).append((op_index,position,item))\n    selected={};seen=set()\n    if not isinstance(source_glyphs,list) or not source_glyphs:\n        raise ValueError(\'선택한 글자의 연결 정보가 없습니다. 글자를 다시 선택하세요.\')\n    for glyph in source_glyphs:\n        if not isinstance(glyph,dict) or not isinstance(glyph.get(\'text\'),str):\n            raise ValueError(\'선택한 글자의 연결 정보가 올바르지 않습니다.\')\n        text=glyph[\'text\']\n        if not text.strip():continue\n        origin=glyph.get(\'origin\');bounds=glyph.get(\'rect\')\n        if (len(text)!=1 or not isinstance(origin,(list,tuple)) or len(origin)!=2 or\n                not isinstance(bounds,(list,tuple)) or len(bounds)!=4 or\n                not all(isinstance(v,(int,float)) and math.isfinite(v) for v in [*origin,*bounds])):\n            raise ValueError(\'선택한 글자의 위치 정보를 확인하지 못했습니다.\')\n        box=Rect(bounds);point=Point(*origin)\n        if not covers(box):raise ValueError(\'선택한 글자의 위치가 선택 영역과 다릅니다. 다시 선택하세요.\')\n        x,y=round(point.x/grid),round(point.y/grid);matches=[]\n        for ox in (-1,0,1):\n            for oy in (-1,0,1):\n                for op_index,position,item in buckets.get((text,x+ox,y+oy),()):\n                    if (point.distance_to(item[\'origin\'])<=tolerance and\n                            max(abs(a-b) for a,b in zip(box,item[\'box\']))<=tolerance):\n                        matches.append((op_index,position))\n        if len(matches)!=1 or matches[0] in seen:\n            raise ValueError(\'선택한 글자의 연결이 바뀌었거나 중복됩니다. 글자를 다시 선택하세요. 원본은 변경되지 않았습니다.\')\n        op_index,position=matches[0]\n        if op_index is None:\n            raise ValueError(\'공유 PDF Form 내부 글자의 원본 연산을 분리할 수 없습니다. 원본은 변경되지 않았습니다.\')\n        seen.add(matches[0]);selected.setdefault(op_index,set()).add(position)\n    return selected\n\n\ndef _edit_text_stream(page, areas, *, movement=None, expected_text=None, source_glyphs=None):\n    """Split a selected glyph run, retaining every other original PDF operator."""\n    from viewer_pdf_engine import PDFIUM_LOCK\n    from pypdf import PdfReader, PdfWriter\n    from pypdf.generic import ArrayObject, FloatObject, NameObject, DecodedStreamObject\n    Rect, Point, Matrix = _geometry()\n    with PDFIUM_LOCK:\n        data = page._doc.tobytes()\n        operations = page._pdfpage.get_contents().operations\n        before, unmarked = _tagged_text_snapshot(data, int(page._number), operations, page.transformation_matrix)\n        touches = lambda box:any((box & area).get_area() > .0001 for area in areas)\n        covers = lambda box:any((area+(-.12,-.12,.12,.12)).contains(box) for area in areas)\n        selected, selected_text = {}, []\n        if source_glyphs is not None:\n            selected=_selected_glyphs(before,unmarked,source_glyphs,covers)\n            selected_text=[item[\'text\'] for index,group in before.items()\n                           for position,item in enumerate(group[\'chars\']) if position in selected.get(index,())]\n        else:\n            if any(item[\'text\'].strip() and touches(item[\'box\']) for item in unmarked):\n                raise ValueError(\'공유 PDF Form 내부 글자의 원본 연산을 분리할 수 없습니다. 원본은 변경되지 않았습니다.\')\n            for index, group in before.items():\n                indexes = set()\n                for position, item in enumerate(group[\'chars\']):\n                    if not item[\'text\'].strip() or not touches(item[\'box\']):continue\n                    if not covers(item[\'box\']):\n                        raise ValueError(\'선택 영역이 글자 객체 일부에 걸칩니다. 글자 전체를 선택하세요. 원본은 변경되지 않았습니다.\')\n                    indexes.add(position);selected_text.append(item[\'text\'])\n                if indexes:selected[index] = indexes\n        compact = lambda value:\'\'.join(str(value).split())\n        if expected_text is not None and compact(\'\'.join(selected_text)) != compact(expected_text):\n            raise ValueError(\'선택한 글자가 변경되었거나 다른 글자와 겹칩니다. 다시 선택하세요.\')\n        if not selected:return 0\n        runs = _text_stream_runs(page._pdfpage, operations, before)\n        updated, lineage = [], {}\n        for index, original in enumerate(operations):\n            if index not in selected:\n                if original[1] in _TEXT_SHOW:lineage[len(updated)] = (index, None)\n                updated.append(original);continue\n            run = runs[index];state = run[\'state\'];tokens = run[\'tokens\']\n            if len(run[\'units\']) != len(before[index][\'chars\']):\n                raise ValueError(\'합자 등으로 문자와 원본 글꼴 코드가 일치하지 않습니다. 원본은 변경되지 않았습니다.\')\n            if state[\'render\'] >= 4 or not state[\'size\'] or not state[\'scale\']:\n                raise ValueError(\'클리핑 또는 크기 0인 글자는 개별 이동·삭제하지 않습니다. 원본은 변경되지 않았습니다.\')\n            indexes = selected[index]\n            # Move a complete font run with its leading/trailing spaces;\n            # partial selections still take only spaces between chosen letters.\n            chars=before[index][\'chars\']\n            if all(i in indexes or not char[\'text\'].strip() for i,char in enumerate(chars)):\n                indexes.update(range(len(chars)))\n            else:\n                for i in range(min(indexes), max(indexes)+1):\n                    if not chars[i][\'text\'].strip():indexes.add(i)\n            updated.extend(run[\'prefix\'])\n            cursor = run[\'matrix\'];chunks = [];previous = False\n            for token in tokens:\n                chosen = token[\'unit\'] in indexes if token[\'unit\'] is not None else previous\n                if not chunks or chosen != chunks[-1][\'selected\']:\n                    chunks.append({\'selected\':chosen, \'tokens\':[], \'matrix\':cursor, \'units\':[]})\n                chunks[-1][\'tokens\'].append(token[\'value\'])\n                if token[\'unit\'] is not None:chunks[-1][\'units\'].append(token[\'unit\'])\n                cursor = Matrix(1,0,0,1,token[\'advance\'],0)*cursor\n                previous = chosen\n            for chunk in chunks:\n                if chunk[\'selected\'] and movement is None:continue\n                matrix = chunk[\'matrix\']\n                if chunk[\'units\']:\n                    anchor=before[index][\'chars\'][chunk[\'units\'][0]][\'origin\']*~page.transformation_matrix*~state[\'ctm\']\n                    matrix=Matrix(matrix.a,matrix.b,matrix.c,matrix.d,\n                                  anchor.x-matrix.c*state[\'rise\'],anchor.y-matrix.d*state[\'rise\'])\n                if chunk[\'selected\']:\n                    dx, dy = movement\n                    inverse = ~state[\'ctm\']\n                    raw_inverse = ~page.transformation_matrix\n                    origin = Point(0,0)*raw_inverse*inverse\n                    shifted = Point(dx,dy)*raw_inverse*inverse\n                    matrix = Matrix(matrix.a,matrix.b,matrix.c,matrix.d,\n                                    matrix.e+shifted.x-origin.x,matrix.f+shifted.y-origin.y)\n                updated.append(([FloatObject(v) for v in matrix], b\'Tm\'))\n                lineage[len(updated)] = (index, chunk[\'units\'])\n                updated.append(([ArrayObject(chunk[\'tokens\'])], b\'TJ\'))\n            # Tm resets both matrices. Restore the original line matrix and move\n            # only the text cursor with an empty TJ adjustment, preserving T* / \'\n            # and any later show operator that uses the same BT/ET text object.\n            line = run[\'line\'];end = run[\'end\']\n            delta = Point(end.e,end.f)*~line\n            if abs(delta.y) > .0001:\n                raise ValueError(\'글자 줄 기준을 복원할 수 없습니다. 원본은 변경되지 않았습니다.\')\n            updated.append(([FloatObject(v) for v in line], b\'Tm\'))\n            updated.append(([ArrayObject([FloatObject(-delta.x*1000./(state[\'size\']*state[\'scale\']))])], b\'TJ\'))\n        # Stage and verify before changing the working document. Tags also map\n        # split runs back to each original glyph and its requested displacement.\n        writer = PdfWriter();writer.clone_document_from_reader(PdfReader(io.BytesIO(data)))\n        staged_page = writer.pages[int(page._number)];content = staged_page.get_contents()\n        content.operations = updated;staged_page.replace_contents(content)\n        buffer = io.BytesIO();writer.write(buffer)\n        after, _ = _tagged_text_snapshot(buffer.getvalue(), int(page._number), updated, page.transformation_matrix)\n        for new_index, (old_index, unit_indexes) in lineage.items():\n            old_chars = before.get(old_index, {}).get(\'chars\', [])\n            source_indexes = list(range(len(old_chars))) if unit_indexes is None else unit_indexes\n            new_chars = after.get(new_index, {}).get(\'chars\', [])\n            if len(new_chars) != len(source_indexes):\n                raise ValueError(\'편집 후 문자 수가 달라졌습니다. 원본은 변경되지 않았습니다.\')\n            for old_position, item in zip(source_indexes, new_chars):\n                previous = old_chars[old_position]\n                offset = movement if movement is not None and old_position in selected.get(old_index, ()) else (0.,0.)\n                box = previous[\'box\']+(offset[0],offset[1],offset[0],offset[1])\n                origin = Point(previous[\'origin\'].x+offset[0],previous[\'origin\'].y+offset[1])\n                if (item[\'text\'] != previous[\'text\'] or origin.distance_to(item[\'origin\']) > .0025 or\n                        max(abs(a-b) for a,b in zip(box,item[\'box\'])) > .0025):\n                    raise ValueError(\'선택 밖 글자 위치 또는 원본 글꼴 간격을 보존하지 못했습니다. 원본은 변경되지 않았습니다.\')\n        stream = DecodedStreamObject();stream.set_data(content.get_data())\n        page._pdfpage[NameObject(\'/Contents\')] = page._doc._writer._add_object(stream)\n        if movement is None:\n            # Removed text must not survive in an unreachable old content stream.\n            page._doc._writer.compress_identical_objects(remove_duplicates=False, remove_unreferenced=True)\n        page._doc._changed()\n        return len(selected)\n\n\ndef move_text_objects(page, rect, dx, dy, expected_text, source_glyphs=None):\n    Rect, Point, Matrix = _geometry()\n    area = Rect(rect)\n    if not page.rect.contains(area+(dx, dy, dx, dy)):\n        raise ValueError(\'글자 박스가 페이지 밖으로 나갈 수 없습니다.\')\n    return _edit_text_stream(page, [area], movement=(float(dx), float(dy)),\n                             expected_text=expected_text,source_glyphs=source_glyphs)\n\n\ndef _set_operations(page, operations):\n    from pypdf.generic import DecodedStreamObject, NameObject\n    content = page._pdfpage.get_contents()\n    content.operations = operations\n    stream = DecodedStreamObject();stream.set_data(content.get_data())\n    page._pdfpage[NameObject(\'/Contents\')] = page._doc._writer._add_object(stream)\n    page._doc._changed()\n\n\ndef _editor_blocks(page):\n    """Only self-contained marked layers can be reordered without lost state."""\n    operations = list(page._pdfpage.get_contents().operations)\n    blocks, start, depth, identity = [], None, 0, None\n    for i,(args,op) in enumerate(operations):\n        if op in (b\'BMC\', b\'BDC\'):\n            if depth == 0 and args[0] in (\'/TheViewerBase\',\'/TheViewerObject\'):\n                start = i\n                identity = str(args[1][\'/ID\']) if op == b\'BDC\' else None\n            depth += 1\n        elif op == b\'EMC\':\n            depth -= 1\n            if depth == 0 and start is not None:\n                blocks.append((identity,operations[start:i+1]));start = None\n    if depth or sum(len(block[1]) for block in blocks) != len(operations):\n        raise ValueError(\'독립된 레이어 경계를 확인하지 못했습니다. 원본은 변경되지 않았습니다.\')\n    return blocks\n\n\ndef vector_paths(page):\n    """Selectable straight paths, identified by their painting occurrence.\n\n    Coordinates are displayed page points. Clipped, patterned and curved\n    artwork remains untouched. Managed layers are inspected by their records.\n    """\n    import hashlib,json\n    from pypdf.generic import ContentStream\n    Rect,Point,Matrix=_geometry();result=[]\n    paints=(b\'S\',b\'s\',b\'f\',b\'F\',b\'f*\',b\'B\',b\'B*\',b\'b\',b\'b*\',b\'n\')\n    def rgb(args,space):\n        values=list(map(float,args))\n        if space==\'/DeviceGray\' and len(values)==1:return [values[0]]*3\n        if space==\'/DeviceRGB\' and len(values)==3:return values\n        if space==\'/DeviceCMYK\' and len(values)==4:\n            return [1-min(1,values[i]+values[3]) for i in range(3)]\n        return None\n    def resolve(value):return value.get_object() if hasattr(value,\'get_object\') else value\n    def walk(stream,resources,matrix,path,clip,ancestors=(),owned=None,inherited=None):\n        if len(path)>24:return\n        state={\'matrix\':matrix,\'clip\':clip,\'complex\':False,\'width\':1.,\'stroke\':[0.,0.,0.],\n               \'fill\':[0.,0.,0.],\'stroke_space\':\'/DeviceGray\',\'fill_space\':\'/DeviceGray\',\n               \'opacity\':1.,\'fill_opacity\':1.,\'dash\':[[],0.],\'cap\':0,\'join\':0,\'masked\':False,\'complex_effect\':False}\n        if inherited:state.update(inherited);state[\'matrix\']=matrix;state[\'clip\']=clip\n        stack=[];marks=[];segments=[];current=start=None;curved=False;clipping=False\n        def point(args):return list(Point(*map(float,args))*state[\'matrix\']*page.transformation_matrix)\n        operations=ContentStream(stream,page._doc._writer).operations\n        for index,(args,op) in enumerate(operations):\n            if op in (b\'BMC\',b\'BDC\'):\n                marks.append(owned)\n                if op==b\'BDC\' and args[0]==\'/TheViewerObject\':owned=str(args[1][\'/ID\'])\n            elif op==b\'EMC\' and marks:owned=marks.pop()\n            elif op==b\'q\':stack.append(dict(state))\n            elif op==b\'Q\' and stack:state=stack.pop()\n            elif op==b\'cm\':state[\'matrix\']=Matrix(*map(float,args))*state[\'matrix\']\n            elif op==b\'w\':state[\'width\']=float(args[0])\n            elif op==b\'J\':state[\'cap\']=int(args[0])\n            elif op==b\'j\':state[\'join\']=int(args[0])\n            elif op==b\'d\':state[\'dash\']=[list(map(float,args[0])),float(args[1])]\n            elif op in (b\'G\',b\'RG\',b\'K\',b\'g\',b\'rg\',b\'k\'):\n                stroke=op in (b\'G\',b\'RG\',b\'K\');role=\'stroke\' if stroke else \'fill\'\n                space={b\'G\':\'/DeviceGray\',b\'g\':\'/DeviceGray\',b\'RG\':\'/DeviceRGB\',b\'rg\':\'/DeviceRGB\',b\'K\':\'/DeviceCMYK\',b\'k\':\'/DeviceCMYK\'}[op]\n                state[role+\'_space\']=space;state[role]=rgb(args,space)\n            elif op in (b\'CS\',b\'cs\'):state[(\'stroke\' if op==b\'CS\' else \'fill\')+\'_space\']=str(args[0])\n            elif op in (b\'SC\',b\'SCN\',b\'sc\',b\'scn\'):\n                role=\'stroke\' if op in (b\'SC\',b\'SCN\') else \'fill\'\n                try:state[role]=rgb(args,state[role+\'_space\'])\n                except (ValueError,TypeError):state[role]=None\n            elif op==b\'gs\':\n                ext=resolve(resolve(resources.get(\'/ExtGState\',{})).get(args[0],{}))\n                state[\'opacity\']=float(ext.get(\'/CA\',state[\'opacity\']));state[\'fill_opacity\']=float(ext.get(\'/ca\',state[\'fill_opacity\']))\n                if \'/LW\' in ext:state[\'width\']=float(ext[\'/LW\'])\n                if \'/LC\' in ext:state[\'cap\']=int(ext[\'/LC\'])\n                if \'/LJ\' in ext:state[\'join\']=int(ext[\'/LJ\'])\n                if \'/D\' in ext:state[\'dash\']=[list(map(float,ext[\'/D\'][0])),float(ext[\'/D\'][1])]\n                if \'/SMask\' in ext:state[\'masked\']=str(ext[\'/SMask\'])!=\'/None\'\n                if str(ext.get(\'/BM\',\'/Normal\')) not in (\'/Normal\',\'/Compatible\'):state[\'complex_effect\']=True\n                if \'/TR\' in ext or \'/TR2\' in ext:state[\'complex_effect\']=True\n            elif op==b\'m\':current=start=point(args)\n            elif op==b\'l\':\n                end=point(args)\n                if current is not None:segments.append([current,end])\n                current=end\n            elif op==b\'re\':\n                x,y,w,h=map(float,args);corners=[point(p) for p in ((x,y),(x+w,y),(x+w,y+h),(x,y+h))]\n                segments.extend([[corners[i],corners[(i+1)%4]] for i in range(4)])\n                current=start=corners[0]\n            elif op==b\'h\':\n                if current is not None and start is not None and math.dist(current,start)>.001:segments.append([current,start])\n                current=start\n            elif op in (b\'c\',b\'v\',b\'y\'):curved=True\n            elif op in (b\'W\',b\'W*\'):clipping=True\n            elif op==b\'Tr\' and int(args[0])>=4:state[\'complex\']=True\n            elif op in paints:\n                if op in (b\'s\',b\'b\',b\'b*\') and current is not None and start is not None and math.dist(current,start)>.001:segments.append([current,start])\n                points=[p for segment in segments for p in segment]\n                box=Rect(min(p[0] for p in points),min(p[1] for p in points),max(p[0] for p in points),max(p[1] for p in points)) if points else None\n                if clipping:\n                    if not curved and len(segments)==4 and all(abs(a[0]-b[0])<.001 or abs(a[1]-b[1])<.001 for a,b in segments):state[\'clip\']=state[\'clip\']&box\n                    else:state[\'complex\']=True\n                stroke=op in (b\'S\',b\'s\',b\'B\',b\'B*\',b\'b\',b\'b*\');filled=op in (b\'f\',b\'F\',b\'f*\',b\'B\',b\'B*\',b\'b\',b\'b*\')\n                transform=state[\'matrix\']*page.transformation_matrix\n                scale=math.sqrt(abs(transform.a*transform.d-transform.b*transform.c))\n                width=max(.1,state[\'width\']*scale);color=state[\'stroke\'];opacity=state[\'opacity\'];thin_fill=False\n                accepted=stroke and not filled\n                # Many office PDFs paint borders as narrow filled rectangles.\n                if filled and not stroke and box and len(segments)==4 and min(box.width,box.height)<=5 and max(box.width,box.height)>=8:\n                    if all(abs(a[0]-b[0])<.001 or abs(a[1]-b[1])<.001 for a,b in segments):\n                        if box.width>=box.height:segments=[[[box.x0,(box.y0+box.y1)/2],[box.x1,(box.y0+box.y1)/2]]]\n                        else:segments=[[[(box.x0+box.x1)/2,box.y0],[(box.x0+box.x1)/2,box.y1]]]\n                        width=min(box.width,box.height);color=state[\'fill\'];opacity=state[\'fill_opacity\'];accepted=True;thin_fill=True\n                if accepted and box and color is not None and not owned and not curved and not clipping and not state[\'complex\'] and not state[\'masked\'] and not state[\'complex_effect\'] and state[\'clip\'].contains(box) and page.rect.contains(box):\n                    clean=[[[round(v,6) for v in p] for p in segment] for segment in segments if math.dist(*segment)>.01]\n                    if clean:\n                        dash=[[],0] if thin_fill else [[round(v*scale,6) for v in state[\'dash\'][0]],round(state[\'dash\'][1]*scale,6)]\n                        style={\'segments\':clean,\'width\':round(max(.1,width),6),\'color\':[round(v,6) for v in color],\n                               \'opacity\':opacity,\'dash\':dash,\'cap\':0 if thin_fill else state[\'cap\'],\'join\':state[\'join\']}\n                        signature=hashlib.sha256(json.dumps(style,sort_keys=True).encode()).hexdigest()\n                        bounds=[min(p[i] for s in clean for p in s) for i in (0,1)]+[max(p[i] for s in clean for p in s) for i in (0,1)]\n                        result.append({\'id\':path+[index],\'signature\':signature,\'rect\':bounds,\'stroke\':style})\n                segments=[];current=start=None;curved=clipping=False\n            elif op==b\'Do\' and \'/XObject\' in resources:\n                obj=resolve(resolve(resources[\'/XObject\']).get(args[0]))\n                if obj is None or obj.get(\'/Subtype\')!=\'/Form\':continue\n                identity=id(obj)\n                if identity in ancestors:continue\n                fm=Matrix(*map(float,obj.get(\'/Matrix\',[1,0,0,1,0,0])))*state[\'matrix\']\n                fc=state[\'clip\']\n                if \'/BBox\' in obj:fc=fc&(Rect(list(map(float,obj[\'/BBox\'])))*fm*page.transformation_matrix)\n                if state[\'complex\'] or state[\'masked\'] or state[\'complex_effect\']:continue\n                child=resolve(obj.get(\'/Resources\',resources))\n                # Forms inherit all graphics state, including stroke styling.\n                walk(obj,child,fm,path+[index],fc,ancestors+(identity,),owned,state)\n    root=page._pdfpage\n    if root.get_contents() is not None:walk(root.get_contents(),resolve(root.get(\'/Resources\',{})),Matrix(),[],page.rect)\n    return result\n\n\ndef remove_vector_paths(page, evidence):\n    """Remove only proven occurrences, cloning each selected shared Form use."""\n    import uuid\n    from pypdf.generic import ContentStream,DecodedStreamObject,DictionaryObject,NameObject\n    current={tuple(p[\'id\']):p for p in vector_paths(page)}\n    identities={tuple(item[\'id\']) for item in evidence}\n    if not identities or len(identities)!=len(evidence) or any(key not in current or current[key][\'signature\']!=item[\'signature\'] for key,item in zip((tuple(e[\'id\']) for e in evidence),evidence)):\n        raise ValueError(\'선 정보가 변경되었습니다. 다시 선택하세요. 원본은 변경되지 않았습니다.\')\n    def modify(stream,resources,paths):\n        content=ContentStream(stream,page._doc._writer);operations=list(content.operations)\n        resources=DictionaryObject(dict(resources))\n        refs=resources.get(\'/XObject\',{});refs=refs.get_object() if hasattr(refs,\'get_object\') else refs\n        xobjects=DictionaryObject(dict(refs))\n        groups={}\n        for path in paths:groups.setdefault(path[0],[]).append(path[1:])\n        for index,tails in groups.items():\n            args,op=operations[index]\n            if tails==[()]:\n                if op not in (b\'S\',b\'s\',b\'f\',b\'F\',b\'f*\',b\'B\',b\'B*\',b\'b\',b\'b*\'):raise ValueError(\'선 그리기 명령이 일치하지 않습니다.\')\n                operations[index]=([],b\'n\');continue\n            if op!=b\'Do\' or any(not tail for tail in tails):raise ValueError(\'선의 연결 정보를 확인하지 못했습니다.\')\n            source=xobjects[args[0]].get_object()\n            child=source.get(\'/Resources\',resources);child=child.get_object() if hasattr(child,\'get_object\') else child\n            updated,child_resources=modify(source,child,tails)\n            clone=DecodedStreamObject()\n            for key,value in source.items():\n                if key not in (\'/Length\',\'/Filter\',\'/DecodeParms\',\'/Resources\'):clone[key]=value\n            clone.set_data(updated.get_data());clone[NameObject(\'/Resources\')]=child_resources\n            name=NameObject(\'/TVLine\'+uuid.uuid4().hex);xobjects[name]=page._doc._writer._add_object(clone)\n            operations[index]=([name],b\'Do\')\n        if xobjects:resources[NameObject(\'/XObject\')]=xobjects\n        content.operations=operations\n        return content,resources\n    resources=page._pdfpage.get(\'/Resources\',{});resources=resources.get_object() if hasattr(resources,\'get_object\') else resources\n    stream,resources=modify(page._pdfpage.get_contents(),resources,list(identities))\n    _set_operations(page,stream.operations);page._pdfpage[NameObject(\'/Resources\')]=resources\n\n\ndef draw_vector_object(page, record):\n    def draw(c):\n        for stroke in record[\'strokes\']:\n            c.saveState();c.setStrokeColorRGB(*stroke[\'color\']);c.setStrokeAlpha(stroke.get(\'opacity\',1))\n            c.setLineWidth(stroke[\'width\']);c.setLineCap(stroke.get(\'cap\',0));c.setLineJoin(stroke.get(\'join\',0))\n            c.setDash(*stroke.get(\'dash\',[[],0]))\n            path=c.beginPath();last=start=None\n            for a,b in stroke[\'segments\']:\n                if last is None or math.dist(a,last)>.0001:path.moveTo(a[0],page.rect.height-a[1]);start=a\n                path.lineTo(b[0],page.rect.height-b[1]);last=b\n                if math.dist(b,start)<.0001:path.close();last=start=None\n            c.drawPath(path,stroke=1,fill=0);c.restoreState()\n    _canvas_layer(page,draw)\n\n\ndef editor_objects(page):\n    import json\n    records = page._pdfpage.get(\'/TheViewerObjects\', [])\n    result = []\n    for entry in records:\n        entry = entry.get_object()\n        record = json.loads(str(entry))\n        if record.get(\'kind\') not in (\'text\',\'image\',\'cover\',\'vector\'):\n            raise ValueError(\'지원하지 않는 편집 개체 정보입니다.\')\n        result.append(record)\n    if result:\n        ranks = {identity:i for i,(identity,_) in enumerate(_editor_blocks(page))}\n        if len({r[\'object_id\'] for r in result}) != len(result) or any(r[\'object_id\'] not in ranks for r in result):\n            raise ValueError(\'편집 개체의 연결 정보가 일치하지 않습니다.\')\n        for record in result:record[\'z\'] = ranks[record[\'object_id\']]\n        result.sort(key=lambda record:record[\'z\'])\n    return result\n\n\ndef _set_editor_records(page, records):\n    import json\n    from pypdf.generic import ArrayObject, TextStringObject, NameObject\n    page._pdfpage[NameObject(\'/TheViewerObjects\')] = ArrayObject([\n        TextStringObject(json.dumps({k:v for k,v in r.items() if k != \'z\'},ensure_ascii=False)) for r in records])\n    page._doc._changed()\n\n\ndef append_editor_object(page, record, draw):\n    """Add one selectable layer, preserving embedded fonts and original artwork."""\n    from pypdf.generic import DictionaryObject, NameObject, TextStringObject\n    records = editor_objects(page)\n    content = page._pdfpage.get_contents()\n    before = list(content.operations) if content is not None else []\n    from viewer_pdf_engine import open as open_pdf\n    with open_pdf() as layer:\n        target = layer.new_page(width=page.rect.width,height=page.rect.height)\n        draw(target)\n        page.show_pdf_page(page.rect,layer,0,keep_proportion=False)\n    merged = list(page._pdfpage.get_contents().operations)\n    if before:\n        if merged[0][1] != b\'q\' or merged[len(before)+1][1] != b\'Q\':\n            raise ValueError(\'새 개체의 PDF 경계를 확인하지 못했습니다.\')\n        addition = merged[len(before)+2:]\n    else:addition = merged\n    if not records:\n        # Original page is one immutable background layer. Each addition is a\n        # separate layer; adding another one never nests earlier managed layers.\n        before = [([NameObject(\'/TheViewerBase\')],b\'BMC\'),([],b\'q\')] + before + [([],b\'Q\'),([],b\'EMC\')]\n    marked = [([NameObject(\'/TheViewerObject\'),DictionaryObject({\n        NameObject(\'/ID\'):TextStringObject(record[\'object_id\'])})],b\'BDC\')] + addition + [([],b\'EMC\')]\n    _set_operations(page,before+marked)\n    _set_editor_records(page,records+[record])\n\n\ndef edit_editor_object(page, operation, draw=None):\n    from pypdf.generic import FloatObject\n    Rect, Point, Matrix = _geometry()\n    records = editor_objects(page)\n    record = next((r for r in records if r[\'object_id\']==operation[\'object_id\']),None)\n    if record is None or max(abs(a-b) for a,b in zip(record[\'rect\'],operation[\'rect\'])) > .1:\n        raise ValueError(\'편집 개체가 변경되었습니다. 다시 선택하세요.\')\n    blocks = _editor_blocks(page)\n    index = next(i for i,b in enumerate(blocks) if b[0]==record[\'object_id\'])\n    kind = operation[\'kind\']\n    if kind == \'object_z\':\n        block = blocks.pop(index)\n        direction = operation[\'direction\']\n        destination = {\'front\':len(blocks),\'back\':0,\'up\':min(len(blocks),index+1),\'down\':max(0,index-1)}.get(direction)\n        if destination is None:raise ValueError(\'올바른 Z 순서를 선택하세요.\')\n        blocks.insert(destination,block)\n    elif kind == \'object_transform\':\n        source,target = Rect(record[\'rect\']),Rect(operation[\'target\'])\n        if target.width < .5 or target.height < .5 or not page.rect.contains(target):\n            raise ValueError(\'개체는 페이지 안에 놓아주세요.\')\n        sx,sy = target.width/source.width,target.height/source.height\n        delta = Matrix(sx,0,0,sy,target.x0-source.x0*sx,target.y0-source.y0*sy)\n        transform = page.transformation_matrix*delta*~page.transformation_matrix\n        identity,ops = blocks[index]\n        blocks[index] = (identity,ops[:1]+[([],b\'q\'),([FloatObject(v) for v in transform],b\'cm\')]+ops[1:-1]+[([],b\'Q\')]+ops[-1:])\n        record[\'rect\'] = list(target)\n        if record.get(\'native_origin\'):record[\'native_origin\']=list(Point(*record[\'native_origin\'])*delta)\n    elif kind in (\'object_delete\',\'object_format\',\'object_image_replace\',\'object_cover_color\',\'object_vector\'):\n        blocks.pop(index);records.remove(record)\n    else:raise ValueError(\'지원하지 않는 개체 편집입니다.\')\n    _set_operations(page,[op for _,block in blocks for op in block])\n    _set_editor_records(page,records)\n    if kind in (\'object_format\',\'object_image_replace\',\'object_cover_color\',\'object_vector\'):\n        updated = {**record,**operation,\'kind\':{\'object_format\':\'text\',\'object_image_replace\':\'image\',\'object_cover_color\':\'cover\',\'object_vector\':\'vector\'}[kind]}\n        updated.pop(\'direction\',None)\n        updated.pop(\'old_text\',None);updated.pop(\'filename\',None)\n        updated.pop(\'native_paths\',None)\n        if kind==\'object_format\':updated.pop(\'native_origin\',None)\n        updated[\'rect\'] = list(operation.get(\'target\',record[\'rect\']))\n        append_editor_object(page,updated,draw)\n        blocks = _editor_blocks(page);block = blocks.pop();blocks.insert(index,block)\n        _set_operations(page,[op for _,block in blocks for op in block])\n    if kind in (\'object_delete\',\'object_format\',\'object_image_replace\',\'object_cover_color\',\'object_vector\'):\n        page._doc._writer.compress_identical_objects(remove_duplicates=False,remove_unreferenced=True)\n    return 1\n\n\ndef install(Page, Document):\n    for name, function in [(\'show_pdf_page\', show_pdf_page), (\'remove_rotation\', remove_rotation),\n                           (\'insert_image\', insert_image), (\'draw_rect\', draw_rect),\n                           (\'draw_line\', draw_line), (\'insert_text\', insert_text),\n                           (\'insert_textbox\', insert_textbox), (\'insert_htmlbox\', insert_htmlbox),\n                           (\'annots\', annots), (\'widgets\', widgets), (\'delete_annot\', delete_annot),\n                           (\'delete_widget\', delete_annot), (\'add_redact_annot\', add_redact_annot),\n                           (\'apply_redactions\', apply_redactions)]:\n        setattr(Page, name, function)\n    Page.new_shape = lambda self: Shape(self)\n'
+_VIEWER_PDF_EDIT_SOURCE = '"""PDF editing with PDFium, pypdf, ReportLab and LGPL Qt only.\n\nText moves/deletions split original glyph runs without regenerating the page.\nAmbiguous selections, partial glyphs and shared Forms are refused. Added text,\nimages and white rectangles have independently selectable marked layers.\n"""\nimport ctypes\nimport io\nimport math\nimport re\nfrom types import SimpleNamespace\n\n\ndef _geometry():\n    from viewer_pdf_engine import Rect, Point, Matrix\n    return Rect, Point, Matrix\n\n\ndef _merge_bytes(page, data, overlay=True):\n    from pypdf import PdfReader\n    layer = PdfReader(io.BytesIO(data)).pages[0]\n    page._pdfpage.merge_page(layer, over=bool(overlay), expand=False)\n    page._doc._changed()\n\n\ndef _canvas_layer(page, draw, overlay=True):\n    from reportlab.pdfgen import canvas\n    buffer = io.BytesIO()\n    c = canvas.Canvas(buffer, pagesize=(page.rect.width, page.rect.height),\n                      pageCompression=1)\n    draw(c)\n    c.showPage()\n    c.save()\n    # Imported layer uses the displayed crop\'s coordinate system.\n    page.show_pdf_page(page.rect, SimpleNamespace(tobytes=lambda **kw: buffer.getvalue()),\n                       0, overlay=overlay, keep_proportion=False)\n\n\ndef show_pdf_page(self, rect, source, pno=0, *, overlay=True, keep_proportion=True,\n                  rotate=0, clip=None, **kwargs):\n    """Place a vector PDF page, clipping its visible crop before transformation."""\n    from pypdf import PdfReader, PdfWriter, Transformation\n    from pypdf.generic import RectangleObject\n    Rect, Point, Matrix = _geometry()\n    target = Rect(rect)\n    if target.is_empty:\n        raise ValueError(\'PDF를 배치할 영역이 없습니다.\')\n    reader = PdfReader(io.BytesIO(source.tobytes()))\n    temporary = PdfWriter()\n    layer = temporary.add_page(reader.pages[int(pno)])\n    # Flatten /Rotate into content and boxes on this temporary source only.\n    if layer.rotation:\n        layer.transfer_rotation_to_content()\n    original_crop, media = layer.cropbox, layer.mediabox\n    crop = RectangleObject((max(float(original_crop.left), float(media.left)),\n                            max(float(original_crop.bottom), float(media.bottom)),\n                            min(float(original_crop.right), float(media.right)),\n                            min(float(original_crop.top), float(media.top))))\n    width, height = float(crop.width), float(crop.height)\n    visible = Rect(0, 0, width, height)\n    area = visible if clip is None else (Rect(clip) & visible)\n    if area.is_empty:\n        return 0\n    sx0, sx1 = float(crop.left)+area.x0, float(crop.left)+area.x1\n    sy0, sy1 = float(crop.top)-area.y1, float(crop.top)-area.y0\n    layer.cropbox = RectangleObject((sx0, sy0, sx1, sy1))\n    angle = math.radians(float(rotate) % 360)\n    cosine, sine = math.cos(angle), math.sin(angle)\n    corners = [(cosine*x-sine*y, sine*x+cosine*y)\n               for x in (sx0, sx1) for y in (sy0, sy1)]\n    minimum_x, maximum_x = min(p[0] for p in corners), max(p[0] for p in corners)\n    minimum_y, maximum_y = min(p[1] for p in corners), max(p[1] for p in corners)\n    scale_x = target.width/(maximum_x-minimum_x)\n    scale_y = target.height/(maximum_y-minimum_y)\n    if keep_proportion:\n        scale_x = scale_y = min(scale_x, scale_y)\n    rendered_width = (maximum_x-minimum_x)*scale_x\n    rendered_height = (maximum_y-minimum_y)*scale_y\n    # Destination coordinates are crop-relative, top left; PDF coordinates are\n    # bottom left. The target is currently unrotated in editing/print composition.\n    raw_target = target * ~self.transformation_matrix\n    if self.rotation:\n        raise ValueError(\'회전 페이지는 먼저 표시 방향을 적용한 뒤 배치하세요.\')\n    scale_x *= raw_target.width/target.width\n    scale_y *= raw_target.height/target.height\n    rendered_width = (maximum_x-minimum_x)*scale_x\n    rendered_height = (maximum_y-minimum_y)*scale_y\n    offset_x = raw_target.x0+(raw_target.width-rendered_width)/2-minimum_x*scale_x\n    offset_y = raw_target.y0+(raw_target.height-rendered_height)/2-minimum_y*scale_y\n    transform = (cosine*scale_x, sine*scale_y, -sine*scale_x,\n                 cosine*scale_y, offset_x, offset_y)\n    self._pdfpage.merge_transformed_page(layer, Transformation(transform),\n                                        over=bool(overlay), expand=False)\n    self._doc._changed()\n    return 1\n\n\ndef remove_rotation(self):\n    if self.rotation:\n        # Keep managed layers independently selectable after a page turn.\n        # pypdf wraps the whole stream; distribute that wrapper to each layer.\n        turn = self.rotation\n        records = editor_objects(self)\n        blocks = _editor_blocks(self) if records else []\n        old_coordinates = self.transformation_matrix\n        self._pdfpage.transfer_rotation_to_content()\n        self._doc._changed()\n        if records:\n            Rect, Point, Matrix = _geometry()\n            operations = list(self._pdfpage.get_contents().operations)\n            count = sum(len(ops) for _,ops in blocks)\n            if (len(operations) != count+3 or operations[0][1] != b\'q\' or\n                    operations[1][1] != b\'cm\' or operations[-1][1] != b\'Q\'):\n                raise ValueError(\'회전한 편집 레이어의 경계를 확인하지 못했습니다.\')\n            delta = ~old_coordinates * Matrix(tuple(float(v) for v in operations[1][0])) * self.transformation_matrix\n            _set_operations(self,[op for _,ops in blocks for op in\n                ops[:1]+operations[:2]+ops[1:-1]+operations[-1:]+ops[-1:]])\n            for record in records:\n                record[\'rect\'] = list(Rect(record[\'rect\'])*delta)\n                if record.get(\'kind\') == \'text\':record[\'rotate\'] = (int(record.get(\'rotate\',0))-turn)%360\n                if record.get(\'native_origin\'):record[\'native_origin\'] = list(Point(*record[\'native_origin\'])*delta)\n                for glyph in record.get(\'source_glyphs\',[]):\n                    glyph[\'rect\'] = list(Rect(glyph[\'rect\'])*delta)\n                    glyph[\'origin\'] = list(Point(*glyph[\'origin\'])*delta)\n                for stroke in record.get(\'strokes\',[]):\n                    stroke[\'segments\'] = [[list(Point(*a)*delta),list(Point(*b)*delta)] for a,b in stroke[\'segments\']]\n            _set_editor_records(self,records)\n    return None\n\n\ndef insert_image(self, rect, *, filename=None, stream=None, pixmap=None, keep_proportion=True,\n                 overlay=True, **kwargs):\n    from reportlab.lib.utils import ImageReader\n    Rect, Point, Matrix = _geometry()\n    area = Rect(rect)\n    if area.is_empty:\n        raise ValueError(\'그림 영역이 없습니다.\')\n    if pixmap is not None:\n        stream = pixmap.tobytes(\'png\')\n    image = ImageReader(io.BytesIO(stream) if stream is not None else str(filename))\n    image_width, image_height = image.getSize()\n    width, height = area.width, area.height\n    if keep_proportion:\n        ratio = min(width/image_width, height/image_height)\n        width, height = image_width*ratio, image_height*ratio\n    x = area.x0+(area.width-width)/2\n    y = self.rect.height-area.y1+(area.height-height)/2\n    def draw(c):\n        c.drawImage(image, x, y, width=width, height=height, mask=\'auto\')\n    _canvas_layer(self, draw, overlay)\n    return 1\n\n\ndef draw_rect(self, rect, *, color=(0, 0, 0), fill=None, width=1,\n              fill_opacity=1, stroke_opacity=1, overlay=True, **kwargs):\n    Rect, Point, Matrix = _geometry()\n    area = Rect(rect)\n    def draw(c):\n        c.setLineWidth(float(width))\n        if color is not None:\n            c.setStrokeColorRGB(*color)\n            c.setStrokeAlpha(float(stroke_opacity))\n        if fill is not None:\n            c.setFillColorRGB(*fill)\n            c.setFillAlpha(float(fill_opacity))\n        c.rect(area.x0, self.rect.height-area.y1, area.width, area.height,\n               stroke=int(color is not None), fill=int(fill is not None))\n    _canvas_layer(self, draw, overlay)\n    return area\n\n\ndef draw_line(self, p1, p2, *, color=(0, 0, 0), width=1, overlay=True, **kwargs):\n    Rect, Point, Matrix = _geometry()\n    a, b = Point(p1), Point(p2)\n    def draw(c):\n        c.setStrokeColorRGB(*color)\n        c.setLineWidth(float(width))\n        c.line(a.x, self.rect.height-a.y, b.x, self.rect.height-b.y)\n    _canvas_layer(self, draw, overlay)\n\n\nclass Shape:\n    def __init__(self, page):\n        self.page = page\n        self.lines = []\n        self.options = {}\n\n    def draw_line(self, a, b):\n        self.lines.append((tuple(a), tuple(b)))\n        return b\n\n    def finish(self, **kwargs):\n        self.options.update(kwargs)\n\n    def commit(self, overlay=True):\n        options = self.options\n        def draw(c):\n            c.setStrokeColorRGB(*options.get(\'color\', (0, 0, 0)))\n            c.setLineWidth(float(options.get(\'width\', 1)))\n            path = c.beginPath()\n            for a, b in self.lines:\n                path.moveTo(a[0], self.page.rect.height-a[1])\n                path.lineTo(b[0], self.page.rect.height-b[1])\n            c.drawPath(path, stroke=1, fill=0)\n        _canvas_layer(self.page, draw, overlay)\n\n\ndef insert_text(self, point, text, *, fontsize=11, color=(0, 0, 0),\n                fontname=\'helv\', rotate=0, overlay=True, **kwargs):\n    from viewer_pdf_engine import Font\n    font = Font(fontname)\n    writer = TextWriter(self.rect)\n    writer.append(point, text, font=font, fontsize=fontsize)\n    writer.write_text(self, color=color, overlay=overlay, rotate=rotate)\n    return str(text).count(\'\\n\')+1\n\n\nclass TextWriter:\n    def __init__(self, rect):\n        self.rect = rect\n        self.items = []\n\n    def append(self, pos, text, *, font=None, fontsize=11, **kwargs):\n        self.items.append((tuple(pos), str(text), font, float(fontsize)))\n        return None\n\n    def write_text(self, page, *, color=(0, 0, 0), overlay=True, rotate=0, **kwargs):\n        from viewer_pdf_engine import Font\n        def draw(c):\n            c.setFillColorRGB(*color)\n            for pos, value, font, fontsize in self.items:\n                actual_font = font or Font(\'helv\')\n                name = getattr(actual_font, \'reportlab_name\', \'Helvetica\')\n                c.saveState()\n                c.translate(pos[0], page.rect.height-pos[1])\n                c.rotate(float(rotate))\n                c.setFont(name, fontsize)\n                for index, line in enumerate(value.split(\'\\n\')):\n                    c.drawString(0, -index*fontsize*1.2, line)\n                c.restoreState()\n        _canvas_layer(page, draw, overlay)\n\n\n_qt_app = None\n\n\ndef _qt_document_pdf(content, css, width, height, scale_low):\n    """Use Qt\'s text layout/fonts; output real, embedded/selectable PDF text."""\n    import os\n    from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QMarginsF, QRectF, QSizeF\n    from PySide6.QtGui import QPageSize, QPainter, QPdfWriter, QTextDocument\n    from PySide6.QtWidgets import QApplication\n    global _qt_app\n    if QApplication.instance() is None:\n        # No window is created; editing subprocesses have no UI event loop.\n        if os.name != \'nt\':\n            os.environ.setdefault(\'QT_QPA_PLATFORM\', \'offscreen\')\n        _qt_app = QApplication([])\n    data = QByteArray()\n    buffer = QBuffer(data)\n    buffer.open(QIODevice.OpenModeFlag.WriteOnly)\n    writer = QPdfWriter(buffer)\n    writer.setResolution(720)\n    writer.setPageSize(QPageSize(QSizeF(width, height), QPageSize.Unit.Point,\n                                \'Viewer text\'))\n    writer.setPageMargins(QMarginsF(0, 0, 0, 0))\n    document = QTextDocument()\n    # Measure at 720 DPI so half/fractional points are not rounded to whole\n    # pixels. PDF painting uses the same device; 10 layout pixels = 1 point.\n    document.documentLayout().setPaintDevice(writer)\n    document.setDocumentMargin(0)\n    document.setDefaultStyleSheet(css or \'\')\n    document.setHtml(content)\n    minimum = max(.01, min(1., float(scale_low)))\n    def measured(scale):\n        document.setTextWidth(width*10/scale)\n        return document.size().height()*scale/10\n    if measured(1.) <= height+.01:\n        scale = 1.\n    elif measured(minimum) > height+.01:\n        buffer.close()\n        return None, -1, minimum\n    else:\n        low, high = minimum, 1.\n        for _ in range(22):\n            middle = (low+high)/2\n            if measured(middle) <= height+.01:\n                low = middle\n            else:\n                high = middle\n        scale = low\n    used = measured(scale)\n    painter = QPainter(writer)\n    if not painter.isActive():\n        raise ValueError(\'PDF 글자 출력 장치를 만들 수 없습니다.\')\n    painter.scale(scale, scale)\n    document.drawContents(painter, QRectF(0, 0, width*10/scale, height*10/scale))\n    painter.end()\n    buffer.close()\n    # Qt rounds a custom page\'s MediaBox to whole points. Restore its exact\n    # requested dimensions and top-left anchor without stretching font glyphs.\n    from pypdf import PdfReader, PdfWriter, Transformation\n    from pypdf.generic import RectangleObject\n    reader=PdfReader(io.BytesIO(bytes(data)));page=reader.pages[0]\n    page.add_transformation(Transformation().translate(0,height-float(page.mediabox.height)))\n    page.mediabox=RectangleObject((0,0,width,height));page.cropbox=RectangleObject((0,0,width,height))\n    output=io.BytesIO();pdf=PdfWriter();pdf.add_page(page);pdf.write(output)\n    return output.getvalue(), max(0., height-used), scale\n\n\ndef insert_htmlbox(self, rect, text, *, css=None, scale_low=0, rotate=0,\n                   overlay=True, **kwargs):\n    Rect, Point, Matrix = _geometry()\n    target = Rect(rect)\n    turn = int(rotate) % 360\n    if turn % 90:\n        raise ValueError(\'글자 회전은 90도 단위로 지정하세요.\')\n    width, height = (target.height, target.width) if turn in (90, 270) else (target.width, target.height)\n    if width <= 0 or height <= 0:\n        return -1, 1\n    data, spare, scale = _qt_document_pdf(str(text), css, width, height, scale_low)\n    if data is not None:\n        source = SimpleNamespace(tobytes=lambda **kw: data)\n        self.show_pdf_page(target, source, 0, rotate=turn,\n                           overlay=overlay, keep_proportion=False)\n    return spare, scale\n\n\ndef insert_textbox(self, rect, text, *, fontsize=11, color=(0, 0, 0),\n                   fontname=\'helv\', align=0, rotate=0, **kwargs):\n    import html\n    alignment = {0:\'left\', 1:\'center\', 2:\'right\', 3:\'justify\'}.get(align, \'left\')\n    rgb = \'#\'+\'\'.join(f\'{max(0,min(255,round(float(v)*255))):02x}\' for v in color)\n    css = f\'p {{ margin:0; font-size:{float(fontsize)}pt; color:{rgb}; text-align:{alignment}; }}\'\n    spare, scale = self.insert_htmlbox(rect, \'<p>\'+html.escape(str(text)).replace(\'\\n\',\'<br>\')+\'</p>\',\n                                     css=css, scale_low=1, rotate=rotate, **kwargs)\n    return spare\n\n\ndef annots(self):\n    for entry in self._pdfpage.get(\'/Annots\', []):\n        obj = entry.get_object()\n        if obj.get(\'/Subtype\') == \'/Widget\':\n            continue\n        kind = 12 if obj.get(\'/Subtype\') == \'/Redact\' else -1\n        yield SimpleNamespace(type=(kind, str(obj.get(\'/Subtype\', \'\'))), _entry=entry)\n\n\ndef widgets(self):\n    for entry in self._pdfpage.get(\'/Annots\', []):\n        if entry.get_object().get(\'/Subtype\') == \'/Widget\':\n            yield SimpleNamespace(_entry=entry)\n\n\ndef delete_annot(self, annotation):\n    from pypdf.generic import NameObject, ArrayObject\n    values = self._pdfpage.get(\'/Annots\', [])\n    selected = getattr(annotation, \'_entry\', annotation)\n    self._pdfpage[NameObject(\'/Annots\')] = ArrayObject([x for x in values if x != selected])\n    self._doc._changed()\n\n\ndef add_redact_annot(self, rect, *, fill=False, cross_out=False, **kwargs):\n    Rect, Point, Matrix = _geometry()\n    if not hasattr(self, \'_redactions\'):\n        self._redactions = []\n    self._redactions.append((Rect(rect), fill))\n    return SimpleNamespace(type=(12, \'Redact\'), rect=Rect(rect))\n\n\ndef _object_address(raw):\n    return ctypes.cast(raw, ctypes.c_void_p).value if raw else None\n\n\ndef _text_objects(pdf_page, matrix):\n    """Map PDFium chars to actual text objects, using page-space char bounds.\n\n    PDFium object bounds inside a Form are local; char bounds avoid that trap.\n    """\n    import pypdfium2.raw as raw\n    Rect, Point, Matrix = _geometry()\n    groups = {}\n    text_page = pdf_page.get_textpage()\n    try:\n        for index in range(text_page.count_chars()):\n            handle = raw.FPDFText_GetTextObject(text_page, index)\n            identity = _object_address(handle)\n            codepoint = raw.FPDFText_GetUnicode(text_page, index)\n            if identity is None or not codepoint:\n                continue\n            item = groups.setdefault(identity, {\'characters\': [], \'rectangles\': []})\n            character = chr(codepoint)\n            item[\'characters\'].append(character)\n            if not character.isspace():\n                left, bottom, right, top = text_page.get_charbox(index)\n                box = Rect(left, bottom, right, top)*matrix\n                if not box.is_empty:\n                    item[\'rectangles\'].append(box)\n    finally:\n        text_page.close()\n    return groups\n\n\ndef _adopt_pdfium(document, pdf):\n    from pypdf import PdfReader, PdfWriter\n    output = io.BytesIO()\n    pdf.save(output)\n    writer = PdfWriter()\n    writer.clone_document_from_reader(PdfReader(io.BytesIO(output.getvalue())))\n    # Clone reachable PDF objects only, never append an incremental revision.\n    if hasattr(writer, \'compress_identical_objects\'):\n        try:\n            writer.compress_identical_objects(remove_duplicates=True, remove_unreferenced=True)\n        except TypeError:  # pypdf versions before the option names changed.\n            writer.compress_identical_objects(remove_identicals=True, remove_orphans=True)\n    document._writer = writer\n    document._changed()\n\n\ndef _edit_objects(page, areas, *, text=0, images=0, graphics=0,\n                  movement=None, expected_text=None):\n    from viewer_pdf_engine import PDFIUM_LOCK\n    with PDFIUM_LOCK:\n        return _edit_objects_locked(page, areas, text=text, images=images,\n                                    graphics=graphics, movement=movement,\n                                    expected_text=expected_text)\n\n\ndef _edit_objects_locked(page, areas, *, text=0, images=0, graphics=0,\n                         movement=None, expected_text=None):\n    import pypdfium2 as pdfium\n    import pypdfium2.raw as raw\n    Rect, Point, Matrix = _geometry()\n    pdf = pdfium.PdfDocument(page._doc.tobytes())\n    pdf_page = pdf[int(page._number)]\n    selected = []\n    try:\n        mapping = _text_objects(pdf_page, page.transformation_matrix)\n        selected_text = []\n        for obj in pdf_page.get_objects():\n            if obj.type == raw.FPDF_PAGEOBJ_TEXT:\n                if int(text) == 1:\n                    continue\n                info = mapping.get(_object_address(obj.raw), {})\n                boxes = info.get(\'rectangles\', [])\n                if not boxes:\n                    continue\n                touching = [any((box & area).get_area() > .0001 for area in areas) for box in boxes]\n                if not any(touching):\n                    continue\n                completely_covered = all(any((area+(-.12,-.12,.12,.12)).contains(box)\n                                            for area in areas) for box in boxes)\n                if not completely_covered:\n                    raise ValueError(\'선택 영역이 하나의 PDF 글자 객체 일부에 걸칩니다. 글자 객체 전체를 선택하세요. 원본은 변경되지 않았습니다.\')\n                if obj.level:\n                    raise ValueError(\'공유된 PDF Form 내부 글자는 개별 삭제·이동할 수 없습니다. 흰색 덮기 또는 새 글자 넣기를 사용하세요. 원본은 변경되지 않았습니다.\')\n                selected.append(obj)\n                selected_text.extend(info.get(\'characters\', []))\n            elif movement is None and ((obj.type == raw.FPDF_PAGEOBJ_IMAGE and int(images) != 0)\n                                        or (obj.type == raw.FPDF_PAGEOBJ_PATH and int(graphics) != 0)):\n                left, bottom, right, top = obj.get_bounds()\n                box = Rect(left, bottom, right, top)*page.transformation_matrix\n                if any((box & area).get_area() > .0001 for area in areas):\n                    if obj.level:\n                        raise ValueError(\'공유 Form 그림·선을 개별 삭제할 수 없습니다.\')\n                    selected.append(obj)\n        if expected_text is not None:\n            compact = lambda value: \'\'.join(str(value).split())\n            if compact(\'\'.join(selected_text)) != compact(expected_text):\n                raise ValueError(\'선택한 글자가 변경되었거나 다른 글자와 겹칩니다. 다시 선택하세요.\')\n        for obj in selected:\n            if movement is None:\n                pdf_page.remove_obj(obj)\n                obj.close()\n            else:\n                dx, dy = movement\n                inverse = ~page.transformation_matrix\n                origin = Point(0, 0)*inverse\n                shifted = Point(dx, dy)*inverse\n                obj.set_matrix(obj.get_matrix().translate(shifted.x-origin.x, shifted.y-origin.y))\n        if selected:\n            pdf_page.gen_content()\n            pdf_page.close()\n            _adopt_pdfium(page._doc, pdf)\n        return len(selected)\n    finally:\n        pdf_page.close()\n        pdf.close()\n\n\ndef apply_redactions(self, *, images=2, graphics=1, text=0, **kwargs):\n    queued = list(getattr(self, \'_redactions\', []))\n    if not queued:\n        return False\n    if not images and not graphics:\n        if int(text) != 1:\n            _edit_text_stream(self, [area for area, fill in queued])\n    else:\n        _edit_objects(self, [area for area, fill in queued], text=text,\n                      images=images, graphics=graphics)\n    self._redactions = []\n    for area, fill in queued:\n        if fill is not False and fill is not None:\n            self.draw_rect(area, color=None, fill=fill, overlay=True)\n    return True\n\n\n_TEXT_SHOW = frozenset((b\'Tj\', b\'TJ\', b"\'", b\'"\'))\n\n\ndef _encoded_text(value):\n    from pypdf.generic import ByteStringObject, TextStringObject\n    if isinstance(value, ByteStringObject):\n        return bytes(value)\n    if isinstance(value, TextStringObject):\n        return value.original_bytes\n    return None\n\n\ndef _font_code_size(font):\n    """Do not guess boundaries in a variable-length/vertical character encoding."""\n    font = font.get_object()\n    if font.get(\'/Subtype\') == \'/Type3\':\n        raise ValueError(\'Type3 글꼴은 원본 배치를 보존하는 개별 글자 편집을 지원하지 않습니다.\')\n    if font.get(\'/Subtype\') != \'/Type0\':\n        return 1\n    if font.get(\'/Encoding\') == \'/Identity-H\':\n        return 2\n    raise ValueError(\'이 PDF 글꼴의 문자 경계를 확정할 수 없습니다. 원본은 변경되지 않았습니다.\')\n\n\ndef _tagged_text_snapshot(data, number, operations, matrix):\n    """Use disposable marked content to map glyphs to original show operators.\n\n    Only this inspection copy carries the tags. No PDFium content regeneration\n    is used for the edited page, so original TJ spacing and graphics survive.\n    """\n    from pypdf import PdfReader, PdfWriter\n    from pypdf.generic import DictionaryObject, NameObject, NumberObject\n    import pypdfium2 as pdfium\n    import pypdfium2.raw as raw\n    Rect, Point, Matrix = _geometry()\n    writer = PdfWriter()\n    writer.clone_document_from_reader(PdfReader(io.BytesIO(data)))\n    target = writer.pages[number]\n    content = target.get_contents()\n    tagged = []\n    for index, (args, operator) in enumerate(operations):\n        if operator in _TEXT_SHOW:\n            tagged.extend([([NameObject(\'/TheViewerInspect\'), DictionaryObject({\n                NameObject(\'/TVTextOp\'): NumberObject(index)})], b\'BDC\'),\n                (args, operator), ([], b\'EMC\')])\n        else:\n            tagged.append((args, operator))\n    content.operations = tagged\n    target.replace_contents(content)\n    output = io.BytesIO()\n    writer.write(output)\n    groups, unmarked = {}, []\n    with pdfium.PdfDocument(output.getvalue()) as document:\n        pdf_page = document[number]\n        text_page = pdf_page.get_textpage()\n        try:\n            for index in range(text_page.count_chars()):\n                if raw.FPDFText_IsGenerated(text_page, index):\n                    continue\n                obj = raw.FPDFText_GetTextObject(text_page, index)\n                if not obj:\n                    continue\n                op_index = None\n                for mark_index in range(raw.FPDFPageObj_CountMarks(obj)):\n                    mark = raw.FPDFPageObj_GetMark(obj, mark_index)\n                    value = ctypes.c_int()\n                    if raw.FPDFPageObjMark_GetParamIntValue(mark, b\'TVTextOp\', ctypes.byref(value)):\n                        op_index = value.value\n                code = raw.FPDFText_GetUnicode(text_page, index)\n                left, bottom, right, top = text_page.get_charbox(index)\n                box = Rect(left, bottom, right, top)*matrix\n                x, y = ctypes.c_double(), ctypes.c_double()\n                if not raw.FPDFText_GetCharOrigin(text_page, index, ctypes.byref(x), ctypes.byref(y)):\n                    raise ValueError(\'글자의 원래 위치를 확인하지 못했습니다.\')\n                item = {\'text\': chr(code) if code else \'\', \'box\': box,\n                        \'origin\': Point(x.value, y.value)*matrix}\n                if op_index is None:\n                    unmarked.append(item)\n                    continue\n                group = groups.setdefault(op_index, {\'chars\': [], \'widths\': {}})\n                group[\'chars\'].append(item)\n                # Font handles are only used while the inspection PDF is open.\n                group[\'font\'] = raw.FPDFTextObj_GetFont(obj)\n            # PDFium\'s glyph-width API accepts Unicode, not the encoded CID.\n            # This is a fallback for simple fonts without a /Widths table;\n            # Identity-H CID widths are read directly from /W and /DW below.\n            for op_index, group in groups.items():\n                for item in group[\'chars\']:\n                    code = ord(item[\'text\']) if item[\'text\'] else 0\n                    if not code or code in group[\'widths\']:continue\n                    width = ctypes.c_float()\n                    if raw.FPDFFont_GetGlyphWidth(group[\'font\'], code, 1000., ctypes.byref(width)):\n                        group[\'widths\'][code] = float(width.value)\n                group.pop(\'font\', None)\n        finally:\n            text_page.close()\n            pdf_page.close()\n    return groups, unmarked\n\n\ndef _font_width_table(font):\n    """Read advances by original character code, including both /W syntaxes."""\n    font = font.get_object()\n    step = _font_code_size(font)\n    if step == 1:\n        first = int(font.get(\'/FirstChar\', 0))\n        widths = {first+i:float(width) for i,width in enumerate(font.get(\'/Widths\', []))}\n        return step, widths, None\n    descendant = font[\'/DescendantFonts\'][0].get_object()\n    values = descendant.get(\'/W\', [])\n    if hasattr(values, \'get_object\'):values = values.get_object()\n    widths, i = {}, 0\n    while i < len(values):\n        first = int(values[i]);value = values[i+1];i += 2\n        if hasattr(value, \'get_object\'):value = value.get_object()\n        if isinstance(value, (list, tuple)):\n            widths.update((first+j, float(width)) for j,width in enumerate(value))\n        else:\n            last = int(value);width = float(values[i]);i += 1\n            if last < first or last-first > 65535:\n                raise ValueError(\'PDF 글꼴 너비 테이블이 올바르지 않습니다.\')\n            widths.update((code,width) for code in range(first,last+1))\n    return step, widths, float(descendant.get(\'/DW\', 1000))\n\n\ndef _text_stream_runs(pdfpage, operations, snapshots):\n    """Track text and line matrices separately, including TJ\'s cursor advance."""\n    from pypdf.generic import ByteStringObject\n    Rect, Point, Matrix = _geometry()\n    resolve = lambda value:value.get_object() if hasattr(value, \'get_object\') else value\n    resources = resolve(pdfpage.get(\'/Resources\', {}))\n    fonts = resolve(resources.get(\'/Font\', {}))\n    font_tables = {}\n    state = {\'ctm\': Matrix(), \'font\': None, \'size\': 0., \'scale\': 1.,\n             \'charspace\': 0., \'wordspace\': 0., \'leading\': 0., \'render\': 0,\'rise\':0.}\n    stack, runs = [], {}\n    text_matrix = line_matrix = Matrix()\n    active = False\n    for index, (args, op) in enumerate(operations):\n        if op == b\'q\':\n            stack.append(state.copy())\n        elif op == b\'Q\':\n            if not stack:\n                raise ValueError(\'PDF 그래픽 상태의 경계를 확인하지 못했습니다.\')\n            state = stack.pop()\n        elif op == b\'cm\':\n            state[\'ctm\'] = Matrix(*map(float, args))*state[\'ctm\']\n        elif op == b\'BT\':\n            text_matrix = line_matrix = Matrix(); active = True\n        elif op == b\'ET\':\n            active = False\n        elif op == b\'Tf\':\n            state[\'font\'], state[\'size\'] = args[0], float(args[1])\n        elif op in (b\'Tc\', b\'Tw\', b\'TL\', b\'Tz\', b\'Tr\',b\'Ts\'):\n            key = {b\'Tc\':\'charspace\', b\'Tw\':\'wordspace\', b\'TL\':\'leading\', b\'Tz\':\'scale\', b\'Tr\':\'render\',b\'Ts\':\'rise\'}[op]\n            state[key] = float(args[0])/(100. if op == b\'Tz\' else 1.)\n        elif op == b\'gs\':\n            ext = resolve(resolve(resources.get(\'/ExtGState\', {})).get(args[0], {}))\n            if \'/Font\' in ext:\n                state[\'font\'], state[\'size\'] = ext[\'/Font\'][0], float(ext[\'/Font\'][1])\n        elif op == b\'Tm\':\n            text_matrix = line_matrix = Matrix(*map(float, args))\n        elif op in (b\'Td\', b\'TD\'):\n            x, y = map(float, args)\n            if op == b\'TD\':state[\'leading\'] = -y\n            text_matrix = line_matrix = Matrix(1,0,0,1,x,y)*line_matrix\n        elif op == b\'T*\':\n            text_matrix = line_matrix = Matrix(1,0,0,1,0,-state[\'leading\'])*line_matrix\n        elif op in _TEXT_SHOW:\n            if not active:\n                raise ValueError(\'PDF 글자 연산의 경계를 확인하지 못했습니다.\')\n            prefix = []\n            if op == b\'"\':\n                state[\'wordspace\'], state[\'charspace\'] = float(args[0]), float(args[1])\n                prefix = [([args[0]], b\'Tw\'), ([args[1]], b\'Tc\')]\n            if op in (b"\'", b\'"\'):\n                text_matrix = line_matrix = Matrix(1,0,0,1,0,-state[\'leading\'])*line_matrix\n                prefix.append(([], b\'T*\'))\n            font = fonts.get(state[\'font\']) if isinstance(state[\'font\'], str) else state[\'font\']\n            if font is None:\n                raise ValueError(\'PDF의 원본 글꼴을 확인하지 못했습니다.\')\n            table_key = str(state[\'font\'])\n            if table_key not in font_tables:font_tables[table_key] = _font_width_table(font)\n            step, width_table, default_width = font_tables[table_key]\n            values = args[0] if op == b\'TJ\' else [args[-1]]\n            tokens, units = [], []\n            width_map = snapshots.get(index, {}).get(\'widths\', {})\n            for value in values:\n                encoded = _encoded_text(value)\n                if encoded is None:\n                    advance = -float(value)*state[\'size\']*state[\'scale\']/1000.\n                    tokens.append({\'value\':value, \'advance\':advance, \'unit\':None})\n                else:\n                    if len(encoded) % step:\n                        raise ValueError(\'PDF 글꼴 코드 경계가 불완전합니다.\')\n                    for start in range(0, len(encoded), step):\n                        code = int.from_bytes(encoded[start:start+step], \'big\')\n                        width = width_table.get(code, default_width)\n                        if width is None:\n                            chars = snapshots.get(index, {}).get(\'chars\', [])\n                            text = chars[len(units)][\'text\'] if len(units) < len(chars) else \'\'\n                            width = width_map.get(ord(text)) if text else None\n                        if width is None:\n                            raise ValueError(\'글자의 원래 너비를 확인하지 못했습니다. 원본은 변경되지 않았습니다.\')\n                        advance = (width*state[\'size\']/1000.+state[\'charspace\']+\n                                   (state[\'wordspace\'] if step == 1 and code == 32 else 0.))*state[\'scale\']\n                        token = {\'value\':ByteStringObject(encoded[start:start+step]),\n                                 \'advance\':advance, \'unit\':len(units)}\n                        units.append(token);tokens.append(token)\n            runs[index] = {\'state\':state.copy(), \'matrix\':text_matrix, \'line\':line_matrix,\n                           \'tokens\':tokens, \'units\':units, \'prefix\':prefix}\n            advance = sum(token[\'advance\'] for token in tokens)\n            text_matrix = Matrix(1,0,0,1,advance,0)*text_matrix\n            runs[index][\'end\'] = text_matrix\n    return runs\n\n\ndef _selected_glyphs(groups, unmarked, source_glyphs, covers):\n    """Resolve selected letters by their Unicode, baseline and tight bounds.\n\n    A neighbouring line can cross the span rectangle without belonging to it.\n    Never widen the rectangle or infer membership from its intersections.\n    """\n    Rect, Point, Matrix = _geometry()\n    tolerance=.0025;grid=.01;buckets={}\n    for op_index, group in list(groups.items())+[(None,{\'chars\':unmarked})]:\n        for position,item in enumerate(group[\'chars\']):\n            if not item[\'text\'].strip():continue\n            origin=item[\'origin\'];key=(item[\'text\'],round(origin.x/grid),round(origin.y/grid))\n            buckets.setdefault(key,[]).append((op_index,position,item))\n    selected={};seen=set()\n    if not isinstance(source_glyphs,list) or not source_glyphs:\n        raise ValueError(\'선택한 글자의 연결 정보가 없습니다. 글자를 다시 선택하세요.\')\n    for glyph in source_glyphs:\n        if not isinstance(glyph,dict) or not isinstance(glyph.get(\'text\'),str):\n            raise ValueError(\'선택한 글자의 연결 정보가 올바르지 않습니다.\')\n        text=glyph[\'text\']\n        if not text.strip():continue\n        origin=glyph.get(\'origin\');bounds=glyph.get(\'rect\')\n        if (len(text)!=1 or not isinstance(origin,(list,tuple)) or len(origin)!=2 or\n                not isinstance(bounds,(list,tuple)) or len(bounds)!=4 or\n                not all(isinstance(v,(int,float)) and math.isfinite(v) for v in [*origin,*bounds])):\n            raise ValueError(\'선택한 글자의 위치 정보를 확인하지 못했습니다.\')\n        box=Rect(bounds);point=Point(*origin)\n        if not covers(box):raise ValueError(\'선택한 글자의 위치가 선택 영역과 다릅니다. 다시 선택하세요.\')\n        x,y=round(point.x/grid),round(point.y/grid);matches=[]\n        for ox in (-1,0,1):\n            for oy in (-1,0,1):\n                for op_index,position,item in buckets.get((text,x+ox,y+oy),()):\n                    if (point.distance_to(item[\'origin\'])<=tolerance and\n                            max(abs(a-b) for a,b in zip(box,item[\'box\']))<=tolerance):\n                        matches.append((op_index,position))\n        if len(matches)!=1 or matches[0] in seen:\n            raise ValueError(\'선택한 글자의 연결이 바뀌었거나 중복됩니다. 글자를 다시 선택하세요. 원본은 변경되지 않았습니다.\')\n        op_index,position=matches[0]\n        if op_index is None:\n            raise ValueError(\'공유 PDF Form 내부 글자의 원본 연산을 분리할 수 없습니다. 원본은 변경되지 않았습니다.\')\n        seen.add(matches[0]);selected.setdefault(op_index,set()).add(position)\n    return selected\n\n\ndef _edit_text_stream(page, areas, *, movement=None, expected_text=None, source_glyphs=None):\n    """Split a selected glyph run, retaining every other original PDF operator."""\n    from viewer_pdf_engine import PDFIUM_LOCK\n    from pypdf import PdfReader, PdfWriter\n    from pypdf.generic import ArrayObject, FloatObject, NameObject, DecodedStreamObject\n    Rect, Point, Matrix = _geometry()\n    with PDFIUM_LOCK:\n        data = page._doc.tobytes()\n        operations = page._pdfpage.get_contents().operations\n        before, unmarked = _tagged_text_snapshot(data, int(page._number), operations, page.transformation_matrix)\n        touches = lambda box:any((box & area).get_area() > .0001 for area in areas)\n        covers = lambda box:any((area+(-.12,-.12,.12,.12)).contains(box) for area in areas)\n        selected, selected_text = {}, []\n        if source_glyphs is not None:\n            selected=_selected_glyphs(before,unmarked,source_glyphs,covers)\n            selected_text=[item[\'text\'] for index,group in before.items()\n                           for position,item in enumerate(group[\'chars\']) if position in selected.get(index,())]\n        else:\n            if any(item[\'text\'].strip() and touches(item[\'box\']) for item in unmarked):\n                raise ValueError(\'공유 PDF Form 내부 글자의 원본 연산을 분리할 수 없습니다. 원본은 변경되지 않았습니다.\')\n            for index, group in before.items():\n                indexes = set()\n                for position, item in enumerate(group[\'chars\']):\n                    if not item[\'text\'].strip() or not touches(item[\'box\']):continue\n                    if not covers(item[\'box\']):\n                        raise ValueError(\'선택 영역이 글자 객체 일부에 걸칩니다. 글자 전체를 선택하세요. 원본은 변경되지 않았습니다.\')\n                    indexes.add(position);selected_text.append(item[\'text\'])\n                if indexes:selected[index] = indexes\n        compact = lambda value:\'\'.join(str(value).split())\n        if expected_text is not None and compact(\'\'.join(selected_text)) != compact(expected_text):\n            raise ValueError(\'선택한 글자가 변경되었거나 다른 글자와 겹칩니다. 다시 선택하세요.\')\n        if not selected:return 0\n        runs = _text_stream_runs(page._pdfpage, operations, before)\n        updated, lineage = [], {}\n        for index, original in enumerate(operations):\n            if index not in selected:\n                if original[1] in _TEXT_SHOW:lineage[len(updated)] = (index, None)\n                updated.append(original);continue\n            run = runs[index];state = run[\'state\'];tokens = run[\'tokens\']\n            if len(run[\'units\']) != len(before[index][\'chars\']):\n                raise ValueError(\'합자 등으로 문자와 원본 글꼴 코드가 일치하지 않습니다. 원본은 변경되지 않았습니다.\')\n            if state[\'render\'] >= 4 or not state[\'size\'] or not state[\'scale\']:\n                raise ValueError(\'클리핑 또는 크기 0인 글자는 개별 이동·삭제하지 않습니다. 원본은 변경되지 않았습니다.\')\n            indexes = selected[index]\n            # Move a complete font run with its leading/trailing spaces;\n            # partial selections still take only spaces between chosen letters.\n            chars=before[index][\'chars\']\n            if all(i in indexes or not char[\'text\'].strip() for i,char in enumerate(chars)):\n                indexes.update(range(len(chars)))\n            else:\n                for i in range(min(indexes), max(indexes)+1):\n                    if not chars[i][\'text\'].strip():indexes.add(i)\n            updated.extend(run[\'prefix\'])\n            cursor = run[\'matrix\'];chunks = [];previous = False\n            for token in tokens:\n                chosen = token[\'unit\'] in indexes if token[\'unit\'] is not None else previous\n                if not chunks or chosen != chunks[-1][\'selected\']:\n                    chunks.append({\'selected\':chosen, \'tokens\':[], \'matrix\':cursor, \'units\':[]})\n                chunks[-1][\'tokens\'].append(token[\'value\'])\n                if token[\'unit\'] is not None:chunks[-1][\'units\'].append(token[\'unit\'])\n                cursor = Matrix(1,0,0,1,token[\'advance\'],0)*cursor\n                previous = chosen\n            for chunk in chunks:\n                if chunk[\'selected\'] and movement is None:continue\n                matrix = chunk[\'matrix\']\n                if chunk[\'units\']:\n                    anchor=before[index][\'chars\'][chunk[\'units\'][0]][\'origin\']*~page.transformation_matrix*~state[\'ctm\']\n                    matrix=Matrix(matrix.a,matrix.b,matrix.c,matrix.d,\n                                  anchor.x-matrix.c*state[\'rise\'],anchor.y-matrix.d*state[\'rise\'])\n                if chunk[\'selected\']:\n                    dx, dy = movement\n                    inverse = ~state[\'ctm\']\n                    raw_inverse = ~page.transformation_matrix\n                    origin = Point(0,0)*raw_inverse*inverse\n                    shifted = Point(dx,dy)*raw_inverse*inverse\n                    matrix = Matrix(matrix.a,matrix.b,matrix.c,matrix.d,\n                                    matrix.e+shifted.x-origin.x,matrix.f+shifted.y-origin.y)\n                updated.append(([FloatObject(v) for v in matrix], b\'Tm\'))\n                lineage[len(updated)] = (index, chunk[\'units\'])\n                updated.append(([ArrayObject(chunk[\'tokens\'])], b\'TJ\'))\n            # Tm resets both matrices. Restore the original line matrix and move\n            # only the text cursor with an empty TJ adjustment, preserving T* / \'\n            # and any later show operator that uses the same BT/ET text object.\n            line = run[\'line\'];end = run[\'end\']\n            delta = Point(end.e,end.f)*~line\n            if abs(delta.y) > .0001:\n                raise ValueError(\'글자 줄 기준을 복원할 수 없습니다. 원본은 변경되지 않았습니다.\')\n            updated.append(([FloatObject(v) for v in line], b\'Tm\'))\n            updated.append(([ArrayObject([FloatObject(-delta.x*1000./(state[\'size\']*state[\'scale\']))])], b\'TJ\'))\n        # Stage and verify before changing the working document. Tags also map\n        # split runs back to each original glyph and its requested displacement.\n        writer = PdfWriter();writer.clone_document_from_reader(PdfReader(io.BytesIO(data)))\n        staged_page = writer.pages[int(page._number)];content = staged_page.get_contents()\n        content.operations = updated;staged_page.replace_contents(content)\n        buffer = io.BytesIO();writer.write(buffer)\n        after, _ = _tagged_text_snapshot(buffer.getvalue(), int(page._number), updated, page.transformation_matrix)\n        for new_index, (old_index, unit_indexes) in lineage.items():\n            old_chars = before.get(old_index, {}).get(\'chars\', [])\n            source_indexes = list(range(len(old_chars))) if unit_indexes is None else unit_indexes\n            new_chars = after.get(new_index, {}).get(\'chars\', [])\n            if len(new_chars) != len(source_indexes):\n                raise ValueError(\'편집 후 문자 수가 달라졌습니다. 원본은 변경되지 않았습니다.\')\n            for old_position, item in zip(source_indexes, new_chars):\n                previous = old_chars[old_position]\n                offset = movement if movement is not None and old_position in selected.get(old_index, ()) else (0.,0.)\n                box = previous[\'box\']+(offset[0],offset[1],offset[0],offset[1])\n                origin = Point(previous[\'origin\'].x+offset[0],previous[\'origin\'].y+offset[1])\n                if (item[\'text\'] != previous[\'text\'] or origin.distance_to(item[\'origin\']) > .0025 or\n                        max(abs(a-b) for a,b in zip(box,item[\'box\'])) > .0025):\n                    raise ValueError(\'선택 밖 글자 위치 또는 원본 글꼴 간격을 보존하지 못했습니다. 원본은 변경되지 않았습니다.\')\n        stream = DecodedStreamObject();stream.set_data(content.get_data())\n        page._pdfpage[NameObject(\'/Contents\')] = page._doc._writer._add_object(stream)\n        if movement is None:\n            # Removed text must not survive in an unreachable old content stream.\n            page._doc._writer.compress_identical_objects(remove_duplicates=False, remove_unreferenced=True)\n        page._doc._changed()\n        return len(selected)\n\n\ndef move_text_objects(page, rect, dx, dy, expected_text, source_glyphs=None):\n    Rect, Point, Matrix = _geometry()\n    area = Rect(rect)\n    if not page.rect.contains(area+(dx, dy, dx, dy)):\n        raise ValueError(\'글자 박스가 페이지 밖으로 나갈 수 없습니다.\')\n    return _edit_text_stream(page, [area], movement=(float(dx), float(dy)),\n                             expected_text=expected_text,source_glyphs=source_glyphs)\n\n\ndef _set_operations(page, operations):\n    from pypdf.generic import DecodedStreamObject, NameObject\n    content = page._pdfpage.get_contents()\n    content.operations = operations\n    stream = DecodedStreamObject();stream.set_data(content.get_data())\n    page._pdfpage[NameObject(\'/Contents\')] = page._doc._writer._add_object(stream)\n    page._doc._changed()\n\n\ndef _editor_blocks(page):\n    """Only self-contained marked layers can be reordered without lost state."""\n    operations = list(page._pdfpage.get_contents().operations)\n    blocks, start, depth, identity = [], None, 0, None\n    for i,(args,op) in enumerate(operations):\n        if op in (b\'BMC\', b\'BDC\'):\n            if depth == 0 and args[0] in (\'/TheViewerBase\',\'/TheViewerObject\'):\n                start = i\n                identity = str(args[1][\'/ID\']) if op == b\'BDC\' else None\n            depth += 1\n        elif op == b\'EMC\':\n            depth -= 1\n            if depth == 0 and start is not None:\n                blocks.append((identity,operations[start:i+1]));start = None\n    if depth or sum(len(block[1]) for block in blocks) != len(operations):\n        raise ValueError(\'독립된 레이어 경계를 확인하지 못했습니다. 원본은 변경되지 않았습니다.\')\n    return blocks\n\n\ndef vector_paths(page):\n    """Selectable straight paths, identified by their painting occurrence.\n\n    Coordinates are displayed page points. Clipped, patterned and curved\n    artwork remains untouched. Managed layers are inspected by their records.\n    """\n    import hashlib,json\n    from pypdf.generic import ContentStream\n    Rect,Point,Matrix=_geometry();result=[]\n    paints=(b\'S\',b\'s\',b\'f\',b\'F\',b\'f*\',b\'B\',b\'B*\',b\'b\',b\'b*\',b\'n\')\n    def rgb(args,space):\n        values=list(map(float,args))\n        if space==\'/DeviceGray\' and len(values)==1:return [values[0]]*3\n        if space==\'/DeviceRGB\' and len(values)==3:return values\n        if space==\'/DeviceCMYK\' and len(values)==4:\n            return [1-min(1,values[i]+values[3]) for i in range(3)]\n        return None\n    def resolve(value):return value.get_object() if hasattr(value,\'get_object\') else value\n    def filled_border_strokes(subpaths,color,opacity):\n        """Office tables may paint many narrow rectangles with one fill command."""\n        styles={}\n        for original in subpaths:\n            edges=list(original)\n            if not edges:return []\n            if math.dist(edges[-1][1],edges[0][0])>.001:edges.append([edges[-1][1],edges[0][0]])\n            if len(edges)!=4 or any(math.dist(edges[i][1],edges[(i+1)%4][0])>.001 for i in range(4)):return []\n            points=[a for a,b in edges]\n            box=Rect(min(p[0] for p in points),min(p[1] for p in points),max(p[0] for p in points),max(p[1] for p in points))\n            if (min(box.width,box.height)<=0 or min(box.width,box.height)>5 or max(box.width,box.height)<8 or\n                    any(abs(a[0]-b[0])>.001 and abs(a[1]-b[1])>.001 for a,b in edges) or\n                    len({(round(p[0],6),round(p[1],6)) for p in points})!=4):return []\n            if box.width>=box.height:segment=[[box.x0,(box.y0+box.y1)/2],[box.x1,(box.y0+box.y1)/2]]\n            else:segment=[[(box.x0+box.x1)/2,box.y0],[(box.x0+box.x1)/2,box.y1]]\n            width=round(max(.1,min(box.width,box.height)),6)\n            if width not in styles:\n                styles[width]={\'segments\':[],\'width\':width,\'color\':[round(v,6) for v in color],\n                               \'opacity\':opacity,\'dash\':[[],0],\'cap\':0,\'join\':0}\n            styles[width][\'segments\'].append([[round(v,6) for v in p] for p in segment])\n        return list(styles.values())\n    def walk(stream,resources,matrix,path,clip,ancestors=(),owned=None,inherited=None):\n        if len(path)>24:return\n        state={\'matrix\':matrix,\'clip\':clip,\'complex\':False,\'width\':1.,\'stroke\':[0.,0.,0.],\n               \'fill\':[0.,0.,0.],\'stroke_space\':\'/DeviceGray\',\'fill_space\':\'/DeviceGray\',\n               \'opacity\':1.,\'fill_opacity\':1.,\'dash\':[[],0.],\'cap\':0,\'join\':0,\'masked\':False,\'complex_effect\':False}\n        if inherited:state.update(inherited);state[\'matrix\']=matrix;state[\'clip\']=clip\n        stack=[];marks=[];segments=[];subpaths=[];subpath=None;current=start=None;curved=False;clipping=False\n        def point(args):return list(Point(*map(float,args))*state[\'matrix\']*page.transformation_matrix)\n        def line(a,b):\n            segment=[a,b];segments.append(segment)\n            if subpath is not None:subpath.append(segment)\n        operations=ContentStream(stream,page._doc._writer).operations\n        for index,(args,op) in enumerate(operations):\n            if op in (b\'BMC\',b\'BDC\'):\n                marks.append(owned)\n                if op==b\'BDC\' and args[0]==\'/TheViewerObject\':owned=str(args[1][\'/ID\'])\n            elif op==b\'EMC\' and marks:owned=marks.pop()\n            elif op==b\'q\':stack.append(dict(state))\n            elif op==b\'Q\' and stack:state=stack.pop()\n            elif op==b\'cm\':state[\'matrix\']=Matrix(*map(float,args))*state[\'matrix\']\n            elif op==b\'w\':state[\'width\']=float(args[0])\n            elif op==b\'J\':state[\'cap\']=int(args[0])\n            elif op==b\'j\':state[\'join\']=int(args[0])\n            elif op==b\'d\':state[\'dash\']=[list(map(float,args[0])),float(args[1])]\n            elif op in (b\'G\',b\'RG\',b\'K\',b\'g\',b\'rg\',b\'k\'):\n                stroke=op in (b\'G\',b\'RG\',b\'K\');role=\'stroke\' if stroke else \'fill\'\n                space={b\'G\':\'/DeviceGray\',b\'g\':\'/DeviceGray\',b\'RG\':\'/DeviceRGB\',b\'rg\':\'/DeviceRGB\',b\'K\':\'/DeviceCMYK\',b\'k\':\'/DeviceCMYK\'}[op]\n                state[role+\'_space\']=space;state[role]=rgb(args,space)\n            elif op in (b\'CS\',b\'cs\'):state[(\'stroke\' if op==b\'CS\' else \'fill\')+\'_space\']=str(args[0])\n            elif op in (b\'SC\',b\'SCN\',b\'sc\',b\'scn\'):\n                role=\'stroke\' if op in (b\'SC\',b\'SCN\') else \'fill\'\n                try:state[role]=rgb(args,state[role+\'_space\'])\n                except (ValueError,TypeError):state[role]=None\n            elif op==b\'gs\':\n                ext=resolve(resolve(resources.get(\'/ExtGState\',{})).get(args[0],{}))\n                state[\'opacity\']=float(ext.get(\'/CA\',state[\'opacity\']));state[\'fill_opacity\']=float(ext.get(\'/ca\',state[\'fill_opacity\']))\n                if \'/LW\' in ext:state[\'width\']=float(ext[\'/LW\'])\n                if \'/LC\' in ext:state[\'cap\']=int(ext[\'/LC\'])\n                if \'/LJ\' in ext:state[\'join\']=int(ext[\'/LJ\'])\n                if \'/D\' in ext:state[\'dash\']=[list(map(float,ext[\'/D\'][0])),float(ext[\'/D\'][1])]\n                if \'/SMask\' in ext:state[\'masked\']=str(ext[\'/SMask\'])!=\'/None\'\n                if str(ext.get(\'/BM\',\'/Normal\')) not in (\'/Normal\',\'/Compatible\'):state[\'complex_effect\']=True\n                if \'/TR\' in ext or \'/TR2\' in ext:state[\'complex_effect\']=True\n            elif op==b\'m\':\n                current=start=point(args);subpath=[];subpaths.append(subpath)\n            elif op==b\'l\':\n                end=point(args)\n                if current is not None:line(current,end)\n                current=end\n            elif op==b\'re\':\n                x,y,w,h=map(float,args);corners=[point(p) for p in ((x,y),(x+w,y),(x+w,y+h),(x,y+h))]\n                subpath=[];subpaths.append(subpath)\n                for i in range(4):line(corners[i],corners[(i+1)%4])\n                current=start=corners[0]\n            elif op==b\'h\':\n                if current is not None and start is not None and math.dist(current,start)>.001:line(current,start)\n                current=start\n            elif op in (b\'c\',b\'v\',b\'y\'):curved=True\n            elif op in (b\'W\',b\'W*\'):clipping=True\n            elif op==b\'Tr\' and int(args[0])>=4:state[\'complex\']=True\n            elif op in paints:\n                if op in (b\'s\',b\'b\',b\'b*\') and current is not None and start is not None and math.dist(current,start)>.001:line(current,start)\n                points=[p for segment in segments for p in segment]\n                box=Rect(min(p[0] for p in points),min(p[1] for p in points),max(p[0] for p in points),max(p[1] for p in points)) if points else None\n                if clipping:\n                    if not curved and len(segments)==4 and all(abs(a[0]-b[0])<.001 or abs(a[1]-b[1])<.001 for a,b in segments):state[\'clip\']=state[\'clip\']&box\n                    else:state[\'complex\']=True\n                stroke=op in (b\'S\',b\'s\',b\'B\',b\'B*\',b\'b\',b\'b*\');filled=op in (b\'f\',b\'F\',b\'f*\',b\'B\',b\'B*\',b\'b\',b\'b*\')\n                transform=state[\'matrix\']*page.transformation_matrix\n                scale=math.sqrt(abs(transform.a*transform.d-transform.b*transform.c))\n                width=max(.1,state[\'width\']*scale);color=state[\'stroke\'];opacity=state[\'opacity\'];fill_styles=[]\n                accepted=stroke and not filled\n                # Many office PDFs paint borders as narrow filled rectangles.\n                if filled and not stroke and box and state[\'fill\'] is not None and not curved:\n                    fill_styles=filled_border_strokes(subpaths,state[\'fill\'],state[\'fill_opacity\'])\n                    if fill_styles:color=state[\'fill\'];accepted=True\n                if accepted and box and color is not None and not owned and not curved and not clipping and not state[\'complex\'] and not state[\'masked\'] and not state[\'complex_effect\'] and state[\'clip\'].contains(box) and page.rect.contains(box):\n                    clean=([s for style in fill_styles for s in style[\'segments\']] if fill_styles else\n                           [[[round(v,6) for v in p] for p in segment] for segment in segments if math.dist(*segment)>.01])\n                    if clean:\n                        styles=fill_styles or [{\'segments\':clean,\'width\':round(max(.1,width),6),\'color\':[round(v,6) for v in color],\n                                               \'opacity\':opacity,\'dash\':[[round(v*scale,6) for v in state[\'dash\'][0]],round(state[\'dash\'][1]*scale,6)],\n                                               \'cap\':state[\'cap\'],\'join\':state[\'join\']}]\n                        signature=hashlib.sha256(json.dumps(styles[0] if len(styles)==1 else styles,sort_keys=True).encode()).hexdigest()\n                        bounds=[min(p[i] for s in clean for p in s) for i in (0,1)]+[max(p[i] for s in clean for p in s) for i in (0,1)]\n                        record={\'id\':path+[index],\'signature\':signature,\'rect\':bounds,\'stroke\':styles[0]}\n                        if len(styles)>1:record[\'strokes\']=styles\n                        result.append(record)\n                segments=[];subpaths=[];subpath=None;current=start=None;curved=clipping=False\n            elif op==b\'Do\' and \'/XObject\' in resources:\n                obj=resolve(resolve(resources[\'/XObject\']).get(args[0]))\n                if obj is None or obj.get(\'/Subtype\')!=\'/Form\':continue\n                identity=id(obj)\n                if identity in ancestors:continue\n                fm=Matrix(*map(float,obj.get(\'/Matrix\',[1,0,0,1,0,0])))*state[\'matrix\']\n                fc=state[\'clip\']\n                if \'/BBox\' in obj:fc=fc&(Rect(list(map(float,obj[\'/BBox\'])))*fm*page.transformation_matrix)\n                if state[\'complex\'] or state[\'masked\'] or state[\'complex_effect\']:continue\n                child=resolve(obj.get(\'/Resources\',resources))\n                # Forms inherit all graphics state, including stroke styling.\n                walk(obj,child,fm,path+[index],fc,ancestors+(identity,),owned,state)\n    root=page._pdfpage\n    if root.get_contents() is not None:walk(root.get_contents(),resolve(root.get(\'/Resources\',{})),Matrix(),[],page.rect)\n    return result\n\n\ndef same_vector_path(left,right):\n    """Compare proven geometry after the PDF writer rounds numeric operands."""\n    tolerance=.0001\n    if max(abs(a-b) for a,b in zip(left[\'rect\'],right[\'rect\']))>tolerance:return False\n    def parts(path):\n        result=[]\n        for stroke in path.get(\'strokes\',[path[\'stroke\']]):\n            for segment in stroke[\'segments\']:result.append((segment,stroke))\n        return sorted(result,key=lambda part:tuple(v for p in part[0] for v in p)+(part[1][\'width\'],))\n    a,b=parts(left),parts(right)\n    if len(a)!=len(b):return False\n    for (sa,pa),(sb,pb) in zip(a,b):\n        if any(abs(x-y)>tolerance for aa,bb in zip(sa,sb) for x,y in zip(aa,bb)):return False\n        if abs(pa[\'width\']-pb[\'width\'])>tolerance:return False\n        if pa[\'cap\']!=pb[\'cap\'] or pa[\'join\']!=pb[\'join\']:return False\n        if any(abs(x-y)>.000001 for x,y in zip(pa[\'color\'],pb[\'color\'])) or abs(pa[\'opacity\']-pb[\'opacity\'])>.000001:return False\n        if (len(pa[\'dash\'][0])!=len(pb[\'dash\'][0]) or abs(pa[\'dash\'][1]-pb[\'dash\'][1])>tolerance or\n                any(abs(x-y)>tolerance for x,y in zip(pa[\'dash\'][0],pb[\'dash\'][0]))):return False\n    return True\n\n\ndef remove_vector_paths(page, evidence):\n    """Remove only proven occurrences, cloning each selected shared Form use."""\n    import uuid\n    from pypdf.generic import ContentStream,DecodedStreamObject,DictionaryObject,NameObject\n    current={tuple(p[\'id\']):p for p in vector_paths(page)}\n    identities={tuple(item[\'id\']) for item in evidence}\n    if not identities or len(identities)!=len(evidence) or any(key not in current or current[key][\'signature\']!=item[\'signature\'] for key,item in zip((tuple(e[\'id\']) for e in evidence),evidence)):\n        raise ValueError(\'선 정보가 변경되었습니다. 다시 선택하세요. 원본은 변경되지 않았습니다.\')\n    def modify(stream,resources,paths):\n        content=ContentStream(stream,page._doc._writer);operations=list(content.operations)\n        resources=DictionaryObject(dict(resources))\n        refs=resources.get(\'/XObject\',{});refs=refs.get_object() if hasattr(refs,\'get_object\') else refs\n        xobjects=DictionaryObject(dict(refs))\n        groups={}\n        for path in paths:groups.setdefault(path[0],[]).append(path[1:])\n        for index,tails in groups.items():\n            args,op=operations[index]\n            if tails==[()]:\n                if op not in (b\'S\',b\'s\',b\'f\',b\'F\',b\'f*\',b\'B\',b\'B*\',b\'b\',b\'b*\'):raise ValueError(\'선 그리기 명령이 일치하지 않습니다.\')\n                operations[index]=([],b\'n\');continue\n            if op!=b\'Do\' or any(not tail for tail in tails):raise ValueError(\'선의 연결 정보를 확인하지 못했습니다.\')\n            source=xobjects[args[0]].get_object()\n            child=source.get(\'/Resources\',resources);child=child.get_object() if hasattr(child,\'get_object\') else child\n            updated,child_resources=modify(source,child,tails)\n            clone=DecodedStreamObject()\n            for key,value in source.items():\n                if key not in (\'/Length\',\'/Filter\',\'/DecodeParms\',\'/Resources\'):clone[key]=value\n            clone.set_data(updated.get_data());clone[NameObject(\'/Resources\')]=child_resources\n            name=NameObject(\'/TVLine\'+uuid.uuid4().hex);xobjects[name]=page._doc._writer._add_object(clone)\n            operations[index]=([name],b\'Do\')\n        if xobjects:resources[NameObject(\'/XObject\')]=xobjects\n        content.operations=operations\n        return content,resources\n    resources=page._pdfpage.get(\'/Resources\',{});resources=resources.get_object() if hasattr(resources,\'get_object\') else resources\n    stream,resources=modify(page._pdfpage.get_contents(),resources,list(identities))\n    _set_operations(page,stream.operations);page._pdfpage[NameObject(\'/Resources\')]=resources\n\n\ndef draw_vector_object(page, record):\n    def draw(c):\n        for stroke in record[\'strokes\']:\n            c.saveState();c.setStrokeColorRGB(*stroke[\'color\']);c.setStrokeAlpha(stroke.get(\'opacity\',1))\n            c.setLineWidth(stroke[\'width\']);c.setLineCap(stroke.get(\'cap\',0));c.setLineJoin(stroke.get(\'join\',0))\n            c.setDash(*stroke.get(\'dash\',[[],0]))\n            path=c.beginPath();last=start=None\n            for a,b in stroke[\'segments\']:\n                if last is None or math.dist(a,last)>.0001:path.moveTo(a[0],page.rect.height-a[1]);start=a\n                path.lineTo(b[0],page.rect.height-b[1]);last=b\n                if math.dist(b,start)<.0001:path.close();last=start=None\n            c.drawPath(path,stroke=1,fill=0);c.restoreState()\n    _canvas_layer(page,draw)\n\n\ndef editor_objects(page):\n    import json\n    records = page._pdfpage.get(\'/TheViewerObjects\', [])\n    result = []\n    for entry in records:\n        entry = entry.get_object()\n        record = json.loads(str(entry))\n        if record.get(\'kind\') not in (\'text\',\'image\',\'cover\',\'vector\'):\n            raise ValueError(\'지원하지 않는 편집 개체 정보입니다.\')\n        result.append(record)\n    if result:\n        ranks = {identity:i for i,(identity,_) in enumerate(_editor_blocks(page))}\n        if len({r[\'object_id\'] for r in result}) != len(result) or any(r[\'object_id\'] not in ranks for r in result):\n            raise ValueError(\'편집 개체의 연결 정보가 일치하지 않습니다.\')\n        for record in result:record[\'z\'] = ranks[record[\'object_id\']]\n        result.sort(key=lambda record:record[\'z\'])\n    return result\n\n\ndef _set_editor_records(page, records):\n    import json\n    from pypdf.generic import ArrayObject, TextStringObject, NameObject\n    page._pdfpage[NameObject(\'/TheViewerObjects\')] = ArrayObject([\n        TextStringObject(json.dumps({k:v for k,v in r.items() if k != \'z\'},ensure_ascii=False)) for r in records])\n    page._doc._changed()\n\n\ndef append_editor_object(page, record, draw):\n    """Add one selectable layer, preserving embedded fonts and original artwork."""\n    from pypdf.generic import DictionaryObject, NameObject, TextStringObject\n    records = editor_objects(page)\n    content = page._pdfpage.get_contents()\n    before = list(content.operations) if content is not None else []\n    from viewer_pdf_engine import open as open_pdf\n    with open_pdf() as layer:\n        target = layer.new_page(width=page.rect.width,height=page.rect.height)\n        draw(target)\n        page.show_pdf_page(page.rect,layer,0,keep_proportion=False)\n    merged = list(page._pdfpage.get_contents().operations)\n    if before:\n        if merged[0][1] != b\'q\' or merged[len(before)+1][1] != b\'Q\':\n            raise ValueError(\'새 개체의 PDF 경계를 확인하지 못했습니다.\')\n        addition = merged[len(before)+2:]\n    else:addition = merged\n    if not records:\n        # Original page is one immutable background layer. Each addition is a\n        # separate layer; adding another one never nests earlier managed layers.\n        before = [([NameObject(\'/TheViewerBase\')],b\'BMC\'),([],b\'q\')] + before + [([],b\'Q\'),([],b\'EMC\')]\n    marked = [([NameObject(\'/TheViewerObject\'),DictionaryObject({\n        NameObject(\'/ID\'):TextStringObject(record[\'object_id\'])})],b\'BDC\')] + addition + [([],b\'EMC\')]\n    _set_operations(page,before+marked)\n    _set_editor_records(page,records+[record])\n\n\ndef edit_editor_object(page, operation, draw=None):\n    from pypdf.generic import FloatObject\n    Rect, Point, Matrix = _geometry()\n    records = editor_objects(page)\n    record = next((r for r in records if r[\'object_id\']==operation[\'object_id\']),None)\n    if record is None or max(abs(a-b) for a,b in zip(record[\'rect\'],operation[\'rect\'])) > .1:\n        raise ValueError(\'편집 개체가 변경되었습니다. 다시 선택하세요.\')\n    blocks = _editor_blocks(page)\n    index = next(i for i,b in enumerate(blocks) if b[0]==record[\'object_id\'])\n    kind = operation[\'kind\']\n    if kind == \'object_z\':\n        block = blocks.pop(index)\n        direction = operation[\'direction\']\n        destination = {\'front\':len(blocks),\'back\':0,\'up\':min(len(blocks),index+1),\'down\':max(0,index-1)}.get(direction)\n        if destination is None:raise ValueError(\'올바른 Z 순서를 선택하세요.\')\n        blocks.insert(destination,block)\n    elif kind == \'object_transform\':\n        source,target = Rect(record[\'rect\']),Rect(operation[\'target\'])\n        if target.width < .5 or target.height < .5 or not page.rect.contains(target):\n            raise ValueError(\'개체는 페이지 안에 놓아주세요.\')\n        sx,sy = target.width/source.width,target.height/source.height\n        delta = Matrix(sx,0,0,sy,target.x0-source.x0*sx,target.y0-source.y0*sy)\n        transform = page.transformation_matrix*delta*~page.transformation_matrix\n        identity,ops = blocks[index]\n        blocks[index] = (identity,ops[:1]+[([],b\'q\'),([FloatObject(v) for v in transform],b\'cm\')]+ops[1:-1]+[([],b\'Q\')]+ops[-1:])\n        record[\'rect\'] = list(target)\n        if record.get(\'native_origin\'):record[\'native_origin\']=list(Point(*record[\'native_origin\'])*delta)\n    elif kind in (\'object_delete\',\'object_format\',\'object_image_replace\',\'object_cover_color\',\'object_vector\'):\n        blocks.pop(index);records.remove(record)\n    else:raise ValueError(\'지원하지 않는 개체 편집입니다.\')\n    _set_operations(page,[op for _,block in blocks for op in block])\n    _set_editor_records(page,records)\n    if kind in (\'object_format\',\'object_image_replace\',\'object_cover_color\',\'object_vector\'):\n        updated = {**record,**operation,\'kind\':{\'object_format\':\'text\',\'object_image_replace\':\'image\',\'object_cover_color\':\'cover\',\'object_vector\':\'vector\'}[kind]}\n        updated.pop(\'direction\',None)\n        updated.pop(\'old_text\',None);updated.pop(\'filename\',None)\n        updated.pop(\'native_paths\',None)\n        if kind==\'object_format\':updated.pop(\'native_origin\',None)\n        updated[\'rect\'] = list(operation.get(\'target\',record[\'rect\']))\n        append_editor_object(page,updated,draw)\n        blocks = _editor_blocks(page);block = blocks.pop();blocks.insert(index,block)\n        _set_operations(page,[op for _,block in blocks for op in block])\n    if kind in (\'object_delete\',\'object_format\',\'object_image_replace\',\'object_cover_color\',\'object_vector\'):\n        page._doc._writer.compress_identical_objects(remove_duplicates=False,remove_unreferenced=True)\n    return 1\n\n\ndef install(Page, Document):\n    for name, function in [(\'show_pdf_page\', show_pdf_page), (\'remove_rotation\', remove_rotation),\n                           (\'insert_image\', insert_image), (\'draw_rect\', draw_rect),\n                           (\'draw_line\', draw_line), (\'insert_text\', insert_text),\n                           (\'insert_textbox\', insert_textbox), (\'insert_htmlbox\', insert_htmlbox),\n                           (\'annots\', annots), (\'widgets\', widgets), (\'delete_annot\', delete_annot),\n                           (\'delete_widget\', delete_annot), (\'add_redact_annot\', add_redact_annot),\n                           (\'apply_redactions\', apply_redactions)]:\n        setattr(Page, name, function)\n    Page.new_shape = lambda self: Shape(self)\n'
 _VIEWER_PDF_ENGINE_SOURCE = '"""The Viewer PDF backend: PDFium rendering/extraction and pypdf persistence.\n\nNo PyMuPDF/MuPDF runtime dependency. Coordinates exposed for extraction use the\nunrotated visible crop box with origin at its top left. Raster coordinates follow\npage rotation, matching the viewer\'s existing page geometry contract.\n"""\nfrom __future__ import annotations\n\nimport builtins\nimport ctypes\nimport io\nimport math\nimport os\nimport threading\nimport functools\nimport inspect\nfrom pathlib import Path\nfrom types import SimpleNamespace\n\nimport pypdfium2 as pdfium\nfrom pypdf import PdfReader, PdfWriter\nfrom pypdf.generic import NameObject, NumberObject, RectangleObject\nfrom PIL import Image\n\ncsRGB = SimpleNamespace(n=3, name=\'DeviceRGB\')\ncsGRAY = SimpleNamespace(n=1, name=\'DeviceGray\')\nTEXT_PRESERVE_IMAGES = 4\nTEXTFLAGS_DICT = 71\nPDF_PERM_PRINT = 4\nPDF_ANNOT_REDACT = 12\nPDF_REDACT_IMAGE_NONE = 0\nPDF_REDACT_IMAGE_REMOVE = 1\nPDF_REDACT_LINE_ART_NONE = 0\nPDF_REDACT_TEXT_REMOVE = 0\n\n# PDFium is process-global and not thread-safe. All backend public operations,\n# including installed editing methods, are serialized by this reentrant lock.\nPDFIUM_LOCK=threading.RLock()\n\ndef _synchronized(func):\n    @functools.wraps(func)\n    def call(*args,**kwargs):\n        with PDFIUM_LOCK:return func(*args,**kwargs)\n    return call\n\n\nclass Point:\n    def __init__(self, *args):\n        if not args: args = (0., 0.)\n        if len(args) == 1: args = tuple(args[0])\n        self.x, self.y = map(float, args)\n    def __iter__(self): return iter((self.x, self.y))\n    def __getitem__(self, i): return (self.x, self.y)[i]\n    def __len__(self): return 2\n    def __repr__(self): return f\'Point({self.x:g}, {self.y:g})\'\n    def __add__(self, other): return Point(self.x+other[0], self.y+other[1])\n    def __sub__(self, other): return Point(self.x-other[0], self.y-other[1])\n    def __mul__(self, other):\n        if isinstance(other, Matrix):\n            return Point(self.x*other.a+self.y*other.c+other.e,\n                         self.x*other.b+self.y*other.d+other.f)\n        return Point(self.x*other, self.y*other)\n    __rmul__ = __mul__\n    def __truediv__(self, value): return Point(self.x/value, self.y/value)\n    def distance_to(self, other, unit=\'pt\'):\n        scale = {\'pt\':1.,\'in\':1/72,\'cm\':2.54/72,\'mm\':25.4/72}.get(unit, 1.)\n        return math.hypot(self.x-other[0], self.y-other[1])*scale\n\n\nclass Matrix:\n    def __init__(self, *args):\n        if not args: vals=(1.,0.,0.,1.,0.,0.)\n        elif len(args)==1 and isinstance(args[0], (Matrix,tuple,list)):\n            vals=tuple(args[0])\n        elif len(args)==1:\n            angle=math.radians(args[0]); co,si=math.cos(angle),math.sin(angle)\n            vals=(co,si,-si,co,0.,0.)\n        elif len(args)==2: vals=(args[0],0.,0.,args[1],0.,0.)\n        elif len(args)==6: vals=args\n        else: raise ValueError(\'Matrix expects an angle, two scales, or six components\')\n        self.a,self.b,self.c,self.d,self.e,self.f=map(float, vals)\n    def __iter__(self): return iter((self.a,self.b,self.c,self.d,self.e,self.f))\n    def __getitem__(self,i): return tuple(self)[i]\n    def __len__(self): return 6\n    def __repr__(self): return \'Matrix(\'+\', \'.join(f\'{v:g}\' for v in self)+\')\'\n    def __mul__(self, other):\n        if isinstance(other, (int,float)): return Matrix(*(v*other for v in self))\n        other=Matrix(other)\n        a,b,c,d,e,f=self; A,B,C,D,E,F=other\n        return Matrix(a*A+b*C, a*B+b*D, c*A+d*C, c*B+d*D,\n                      e*A+f*C+E, e*B+f*D+F)\n    def __invert__(self):\n        determinant=self.a*self.d-self.b*self.c\n        if abs(determinant)<1e-12: raise ValueError(\'Singular PDF transform\')\n        a,d=self.d/determinant,self.a/determinant\n        b,c=-self.b/determinant,-self.c/determinant\n        return Matrix(a,b,c,d,-self.e*a-self.f*c,-self.e*b-self.f*d)\n    def invert(self, other=None):\n        value=~(Matrix(other) if other is not None else self)\n        self.a,self.b,self.c,self.d,self.e,self.f=tuple(value)\n        return 0\n    def pretranslate(self,x,y):\n        value=Matrix(1,0,0,1,x,y)*self\n        self.a,self.b,self.c,self.d,self.e,self.f=tuple(value);return self\n    def prerotate(self,angle):\n        value=Matrix(angle)*self\n        self.a,self.b,self.c,self.d,self.e,self.f=tuple(value);return self\n    def prescale(self,x,y):\n        value=Matrix(x,y)*self\n        self.a,self.b,self.c,self.d,self.e,self.f=tuple(value);return self\n    @property\n    def is_rectilinear(self):\n        return (abs(self.b)<1e-9 and abs(self.c)<1e-9) or (abs(self.a)<1e-9 and abs(self.d)<1e-9)\n\n\nclass Rect:\n    def __init__(self, *args):\n        if not args: args=(0.,0.,0.,0.)\n        if len(args)==1: args=tuple(args[0])\n        elif len(args)==2: args=(*args[0],*args[1])\n        if len(args)!=4: raise ValueError(\'Rect requires four coordinates\')\n        self.x0,self.y0,self.x1,self.y1=map(float,args)\n    def __iter__(self): return iter((self.x0,self.y0,self.x1,self.y1))\n    def __getitem__(self,i): return tuple(self)[i]\n    def __len__(self): return 4\n    def __repr__(self): return \'Rect(\'+\', \'.join(f\'{v:g}\' for v in self)+\')\'\n    @property\n    def width(self): return max(0.,self.x1-self.x0)\n    @property\n    def height(self): return max(0.,self.y1-self.y0)\n    @property\n    def is_empty(self): return self.x1<=self.x0 or self.y1<=self.y0\n    @property\n    def is_infinite(self): return any(not math.isfinite(v) for v in self)\n    @property\n    def tl(self): return Point(self.x0,self.y0)\n    @property\n    def tr(self): return Point(self.x1,self.y0)\n    @property\n    def bl(self): return Point(self.x0,self.y1)\n    @property\n    def br(self): return Point(self.x1,self.y1)\n    @property\n    def irect(self): return Rect(math.floor(self.x0),math.floor(self.y0),math.ceil(self.x1),math.ceil(self.y1))\n    def get_area(self): return self.width*self.height\n    def normalize(self):\n        self.x0,self.x1=min(self.x0,self.x1),max(self.x0,self.x1)\n        self.y0,self.y1=min(self.y0,self.y1),max(self.y0,self.y1); return self\n    def contains(self, other):\n        if len(other)==2:\n            return self.x0<=other[0]<=self.x1 and self.y0<=other[1]<=self.y1\n        r=Rect(other)\n        return self.x0<=r.x0 and self.y0<=r.y0 and self.x1>=r.x1 and self.y1>=r.y1\n    def intersects(self, other): return not (self & other).is_empty\n    def __add__(self, other): return Rect(*(a+b for a,b in zip(self,other)))\n    def __sub__(self, other): return Rect(*(a-b for a,b in zip(self,other)))\n    def __and__(self, other):\n        r=Rect(other);return Rect(max(self.x0,r.x0),max(self.y0,r.y0),min(self.x1,r.x1),min(self.y1,r.y1))\n    def __or__(self, other):\n        r=Rect(other)\n        if self.is_empty:return Rect(r)\n        if r.is_empty:return Rect(self)\n        return Rect(min(self.x0,r.x0),min(self.y0,r.y0),max(self.x1,r.x1),max(self.y1,r.y1))\n    def intersect(self, other):\n        r=self & other;self.x0,self.y0,self.x1,self.y1=tuple(r);return self\n    def include_rect(self, other):\n        r=self | other;self.x0,self.y0,self.x1,self.y1=tuple(r);return self\n    def __mul__(self, other):\n        if isinstance(other, (int,float)): return Rect(*(v*other for v in self))\n        matrix=Matrix(other);points=[p*matrix for p in (self.tl,self.tr,self.bl,self.br)]\n        return Rect(min(p.x for p in points),min(p.y for p in points),max(p.x for p in points),max(p.y for p in points))\n    __rmul__=__mul__\n    def __truediv__(self, other): return self*(1/other if isinstance(other,(int,float)) else ~Matrix(other))\n\n\nclass Pixmap:\n    """Owned RGB/RGBA/gray raster; samples are packed in top-to-bottom rows."""\n    def __init__(self, image, x=0, y=0):\n        if isinstance(image, Pixmap): image=image._image.copy()\n        elif isinstance(image,(bytes,bytearray,memoryview)):\n            with Image.open(io.BytesIO(bytes(image))) as opened: image=opened.copy()\n        elif isinstance(image,(str,os.PathLike)):\n            with Image.open(image) as opened:image=opened.copy()\n        if not isinstance(image,Image.Image):raise TypeError(\'Pixmap requires a Pillow image or encoded image bytes\')\n        if image.mode not in (\'L\',\'LA\',\'RGB\',\'RGBA\'):image=image.convert(\'RGBA\' if \'A\' in image.getbands() else \'RGB\')\n        self._image=image;self.x,self.y=int(x),int(y)\n    @property\n    def width(self):return self._image.width\n    @property\n    def height(self):return self._image.height\n    @property\n    def n(self):return len(self._image.getbands())\n    @property\n    def alpha(self):return int(\'A\' in self._image.getbands())\n    @property\n    def stride(self):return self.width*self.n\n    @property\n    def samples(self):return self._image.tobytes()\n    @property\n    def samples_mv(self):return memoryview(self.samples)\n    @property\n    def colorspace(self):return csGRAY if self.n-self.alpha==1 else csRGB\n    @property\n    def irect(self):return Rect(self.x,self.y,self.x+self.width,self.y+self.height)\n    def tobytes(self, output=\'png\', jpg_quality=95):\n        output=output.lower();buffer=io.BytesIO();img=self._image\n        if output in (\'jpg\',\'jpeg\'):\n            if img.mode not in (\'L\',\'RGB\'):img=img.convert(\'RGB\')\n            img.save(buffer,format=\'JPEG\',quality=jpg_quality)\n        elif output in (\'png\',\'ppm\',\'pam\',\'pbm\',\'pgm\'):\n            img.save(buffer,format=\'PNG\' if output==\'png\' else \'PPM\')\n        else:raise ValueError(\'Unsupported image output \'+output)\n        return buffer.getvalue()\n    def save(self,path,output=None):\n        with builtins.open(path,\'wb\') as stream:stream.write(self.tobytes(output or Path(path).suffix.lstrip(\'.\') or \'png\'))\n\n\nclass Font:\n    """Real ReportLab font metrics for the text reader/writer API."""\n    def __init__(self, name=\'helv\', fontfile=None, **kwargs):\n        from reportlab.pdfbase import pdfmetrics\n        from reportlab.pdfbase.ttfonts import TTFont\n        from reportlab.pdfbase.cidfonts import UnicodeCIDFont\n        aliases={\'helv\':\'Helvetica\',\'hebo\':\'Helvetica-Bold\',\'heit\':\'Helvetica-Oblique\',\'hebi\':\'Helvetica-BoldOblique\',\n                 \'tiro\':\'Times-Roman\',\'tibo\':\'Times-Bold\',\'cour\':\'Courier\',\'cobo\':\'Courier-Bold\'}\n        self.name=name;self.fontname=aliases.get(name,name)\n        if fontfile or name in (\'cjk\',\'korea\',\'japan\',\'china-s\',\'china-t\'):\n            candidates=[fontfile] if fontfile else []\n            win=Path(os.environ.get(\'WINDIR\',\'C:/Windows\'))/\'Fonts\'\n            candidates.extend([win/\'malgun.ttf\',win/\'gulim.ttc\',Path(\'/System/Library/Fonts/Supplemental/AppleGothic.ttf\'),\n                               Path(\'/usr/local/share/fonts/theviewer-post/DroidSansFallback.ttf\')])\n            chosen=next((Path(p) for p in candidates if p and Path(p).is_file()),None)\n            if chosen:\n                registered=\'TheViewerEmbedded_\'+chosen.stem\n                if registered not in pdfmetrics.getRegisteredFontNames():\n                    pdfmetrics.registerFont(TTFont(registered,str(chosen)))\n                self.fontname=registered\n            else:\n                self.fontname=\'HYSMyeongJo-Medium\'\n                if self.fontname not in pdfmetrics.getRegisteredFontNames():pdfmetrics.registerFont(UnicodeCIDFont(self.fontname))\n        try:font=pdfmetrics.getFont(self.fontname)\n        except KeyError:raise ValueError(\'Unsupported font: \'+str(name))\n        self.reportlab_name=self.fontname\n        self.ascender=font.face.ascent/1000\n        self.descender=font.face.descent/1000\n    def text_length(self,text,fontsize=11,**kwargs):\n        from reportlab.pdfbase import pdfmetrics\n        return pdfmetrics.stringWidth(str(text),self.reportlab_name,float(fontsize))\n\n\nclass _Tools:\n    def __init__(self):self.small_glyph_heights=True\n    def set_small_glyph_heights(self, value=None):\n        if value is not None:self.small_glyph_heights=bool(value)\n        return self.small_glyph_heights\n    def mupdf_display_errors(self,value=None):return False\n    def mupdf_display_warnings(self,value=None):return False\nTOOLS=_Tools()\n\n\nclass Document:\n    def __init__(self, filename=None, stream=None, filetype=None, password=None, **kwargs):\n        self.name=str(filename or \'\');self.is_pdf=True;self.is_closed=False\n        self._writer=PdfWriter();self._reader=None;self._cached_pdfium=None;self._raw_source=None\n        self._needs_pass=False;self._encrypted=False;self._permissions=0xffffffff\n        if stream is not None:data=bytes(stream)\n        elif filename is not None:\n            if hasattr(filename,\'read\'):data=filename.read()\n            else:\n                with builtins.open(filename,\'rb\') as handle:data=handle.read()\n        else:data=None\n        if data is not None:\n            if filetype not in (None,\'pdf\') or not data.lstrip().startswith(b\'%PDF-\'):\n                raise ValueError(\'This backend opens PDF documents; image conversion must use insert_image\')\n            self._raw_source=data;self._reader=PdfReader(io.BytesIO(data),strict=False)\n            self._encrypted=bool(self._reader.is_encrypted)\n            if self._encrypted:\n                self._permissions=int(self._reader.trailer[\'/Encrypt\'].get(\'/P\',0)) & 0xffffffff\n                try:self._needs_pass=not bool(self._reader.decrypt(password or \'\'))\n                except Exception:self._needs_pass=True\n            if not self._needs_pass:self._writer.clone_document_from_reader(self._reader)\n    def _ensure(self):\n        if self.is_closed:raise ValueError(\'PDF document is closed\')\n        if self.needs_pass:raise ValueError(\'암호가 설정된 PDF입니다.\')\n    def _changed(self):\n        if self._cached_pdfium is not None:self._cached_pdfium.close()\n        self._cached_pdfium=None\n    def _pdfium(self):\n        self._ensure()\n        if self._cached_pdfium is None:\n            self._cached_pdfium=pdfium.PdfDocument(self.tobytes())\n            self._cached_pdfium.init_forms()\n        return self._cached_pdfium\n    @property\n    def needs_pass(self):return self._needs_pass\n    @property\n    def is_encrypted(self):return self._encrypted and self._needs_pass\n    @property\n    def permissions(self):return self._permissions\n    @property\n    def page_count(self):\n        if self.needs_pass:raise ValueError(\'암호를 확인하기 전에는 쪽수를 읽을 수 없습니다.\')\n        return len(self._writer.pages)\n    @property\n    def metadata(self):\n        aliases={\'title\':\'/Title\',\'author\':\'/Author\',\'subject\':\'/Subject\',\'keywords\':\'/Keywords\',\'creator\':\'/Creator\',\n                 \'producer\':\'/Producer\',\'creationDate\':\'/CreationDate\',\'modDate\':\'/ModDate\',\'trapped\':\'/Trapped\'}\n        md=self._writer.metadata or {}\n        return {key:str(md.get(pdf,\'\')) for key,pdf in aliases.items()}\n    def authenticate(self,password):\n        if not self._encrypted:return 1\n        try:rc=self._reader.decrypt(password)\n        except Exception:return 0\n        if not rc:return 0\n        self._writer=PdfWriter();self._writer.clone_document_from_reader(self._reader)\n        self._needs_pass=False;self._changed();return int(rc)\n    def __len__(self):return self.page_count\n    def __iter__(self):\n        for i in range(len(self)):yield self[i]\n    def __getitem__(self,n):\n        self._ensure()\n        if isinstance(n,slice):return [self[i] for i in range(*n.indices(len(self)))]\n        n=int(n)\n        if n<0:n+=len(self)\n        if not 0<=n<len(self):raise IndexError(\'PDF page index out of range\')\n        return Page(self,n)\n    def load_page(self,n):return self[n]\n    def new_page(self,pno=-1,width=595,height=842):\n        self._ensure()\n        if width<=0 or height<=0:raise ValueError(\'PDF page dimensions must be positive\')\n        index=len(self) if pno is None or pno<0 else int(pno)\n        if not 0<=index<=len(self):raise IndexError(\'New page index out of range\')\n        (self._writer.add_blank_page(width=float(width),height=float(height)) if index==len(self) else self._writer.insert_blank_page(width=float(width),height=float(height),index=index))\n        self._changed();return self[index]\n    def insert_pdf(self,doc,from_page=0,to_page=-1,start_at=-1,rotate=-1,links=True,annots=True,widgets=True,**kwargs):\n        self._ensure();doc._ensure()\n        # Snapshot also supports inserting this document into itself safely.\n        reader=PdfReader(io.BytesIO(doc.tobytes()))\n        end=len(reader.pages)-1 if to_page<0 else int(to_page)\n        begin=int(from_page)\n        if not 0<=begin<len(reader.pages) or not 0<=end<len(reader.pages):raise IndexError(\'Source page range out of bounds\')\n        numbers=list(range(begin,end+1)) if begin<=end else list(range(begin,end-1,-1))\n        target=len(self) if start_at<0 else int(start_at)\n        if not 0<=target<=len(self):raise IndexError(\'Target page index out of bounds\')\n        for offset,n in enumerate(numbers):\n            page=reader.pages[n]\n            if rotate>=0:page[NameObject(\'/Rotate\')]=NumberObject(int(rotate)%360)\n            if not annots:page.pop(\'/Annots\',None)\n            self._writer.insert_page(page,index=target+offset)\n        self._changed()\n    def delete_page(self,n):\n        self._ensure();del self._writer.pages[int(n)];self._changed()\n    def delete_pages(self,from_page=0,to_page=-1):\n        end=len(self)-1 if to_page<0 else to_page\n        for n in range(end,from_page-1,-1):del self._writer.pages[n]\n        self._changed()\n    def set_metadata(self,value):\n        aliases={\'title\':\'/Title\',\'author\':\'/Author\',\'subject\':\'/Subject\',\'keywords\':\'/Keywords\',\'creator\':\'/Creator\',\n                 \'producer\':\'/Producer\',\'creationDate\':\'/CreationDate\',\'modDate\':\'/ModDate\',\'trapped\':\'/Trapped\'}\n        self._writer.add_metadata({aliases.get(k,k):str(v) for k,v in value.items() if v is not None and (k in aliases or str(k).startswith(\'/\'))})\n        self._changed()\n    def tobytes(self,garbage=0,deflate=False,**kwargs):\n        self._ensure()\n        buffer=io.BytesIO();self._writer.write(buffer);return buffer.getvalue()\n    def save(self,filename,garbage=0,deflate=False,**kwargs):\n        self._ensure()\n        if deflate:\n            for page in self._writer.pages:\n                if page.get_contents() is not None:page.compress_content_streams()\n            self._changed()\n        data=self.tobytes()\n        if hasattr(filename,\'write\'):filename.write(data)\n        else:\n            with builtins.open(filename,\'wb\') as handle:handle.write(data)\n    def subset_fonts(self,**kwargs):\n        # ReportLab subsets newly embedded TTF fonts during generation. Existing\n        # fonts are deliberately preserved: their complete bytes remain valid.\n        return 0\n    def bake(self,annots=True,widgets=True):\n        self._ensure()\n        if not (annots or widgets):return\n        if annots!=widgets:\n            raise ValueError(\'PDFium flattens annotations and widgets together; selective flattening is unavailable\')\n        if not any(page.get(\'/Annots\') for page in self._writer.pages):return\n        document=self._pdfium()\n        for i in range(len(self)):\n            page=document[i]\n            try:\n                rc=pdfium.raw.FPDFPage_Flatten(page,pdfium.raw.FLAT_NORMALDISPLAY)\n                if rc==pdfium.raw.FLATTEN_FAIL:raise ValueError(\'PDF annotations/forms could not be flattened\')\n            finally:page.close()\n        buffer=io.BytesIO();document.save(buffer)\n        self._writer=PdfWriter(clone_from=PdfReader(io.BytesIO(buffer.getvalue())));self._changed()\n    def close(self):\n        self._changed();self.is_closed=True\n    def __enter__(self):self._ensure();return self\n    def __exit__(self,*args):self.close()\n\n\ndef open(filename=None,stream=None,filetype=None,**kwargs):\n    return Document(filename,stream=stream,filetype=filetype,**kwargs)\n\n\nclass Page:\n    def __init__(self,document,number):self._doc=document;self._number=number\n    @property\n    def number(self):return self._number\n    @property\n    def parent(self):return self._doc\n    @property\n    def _pdfpage(self):self._doc._ensure();return self._doc._writer.pages[self._number]\n    def _pdfium_page(self):return self._doc._pdfium()[self._number]\n    @property\n    def rotation(self):return int(self._pdfpage.get(\'/Rotate\',0))%360\n    @property\n    def mediabox(self):return Rect(tuple(float(v) for v in self._pdfpage.mediabox))\n    @property\n    def cropbox(self):return Rect(tuple(float(v) for v in self._pdfpage.cropbox))\n    @property\n    def _visible_pdf_box(self):return self.mediabox & self.cropbox\n    @property\n    def _user_unit(self):\n        value=float(self._pdfpage.get(\'/UserUnit\',1.))\n        if not math.isfinite(value) or value<=0:raise ValueError(\'Invalid PDF UserUnit\')\n        return value\n    @property\n    def _unrotated_rect(self):\n        b=self._visible_pdf_box;return Rect(0,0,b.width*self._user_unit,b.height*self._user_unit)\n    @property\n    def rect(self):\n        r=self._unrotated_rect\n        return Rect(0,0,r.height,r.width) if self.rotation in (90,270) else r\n    @property\n    def transformation_matrix(self):\n        b=self._visible_pdf_box\n        u=self._user_unit\n        return Matrix(u,0,0,-u,-b.x0*u,b.y1*u)\n    @property\n    def rotation_matrix(self):\n        r=self._unrotated_rect;rotation=self.rotation\n        return {0:Matrix(),90:Matrix(0,1,-1,0,r.height,0),180:Matrix(-1,0,0,-1,r.width,r.height),\n                270:Matrix(0,-1,1,0,0,r.width)}[rotation]\n    @property\n    def derotation_matrix(self):return ~self.rotation_matrix\n    def set_rotation(self,angle):\n        if int(angle)%90:raise ValueError(\'PDF page rotation must be a multiple of 90\')\n        self._pdfpage[NameObject(\'/Rotate\')]=NumberObject(int(angle)%360);self._doc._changed()\n    def remove_rotation(self):\n        if self.rotation:self._pdfpage.transfer_rotation_to_content();self._doc._changed()\n    def set_cropbox(self,rect):\n        rect=Rect(rect)\n        if rect.is_empty or not self.mediabox.contains(rect):raise ValueError(\'Crop box must be inside media box\')\n        self._pdfpage.cropbox=RectangleObject(tuple(rect));self._doc._changed()\n    def get_contents(self):\n        contents=self._pdfpage.get_contents()\n        return [1] if contents is not None and contents.get_data() else []\n    def get_pixmap(self,matrix=None,dpi=None,colorspace=csRGB,clip=None,alpha=False,annots=True,**kwargs):\n        import numpy as np\n        matrix=Matrix(float(dpi)/72,float(dpi)/72) if dpi is not None else Matrix(matrix or (1,0,0,1,0,0))\n        if abs(matrix.a*matrix.d-matrix.b*matrix.c)<1e-12:raise ValueError(\'Singular raster transform\')\n        area=self.rect if clip is None else self.rect & Rect(clip)\n        if area.is_empty:raise ValueError(\'Raster clip does not intersect page\')\n        transformed=area*matrix\n        x0,y0=math.floor(transformed.x0+1e-8),math.floor(transformed.y0+1e-8)\n        x1,y1=math.ceil(transformed.x1-1e-8),math.ceil(transformed.y1-1e-8)\n        width,height=x1-x0,y1-y0\n        if width<1 or height<1:raise ValueError(\'Raster size is empty\')\n        if width*height>150_000_000:raise ValueError(\'요청한 렌더링이 너무 큽니다. 해상도를 낮춰주세요.\')\n        page=self._pdfium_page()\n        try:\n            gray=getattr(colorspace,\'n\',3)==1\n            # PDFium applies this matrix to its normalized, already rotated\n            # top-left page space. Rendering vectors at the final affine matrix\n            # avoids resampling artifacts that otherwise become false differences.\n            temp_document=None\n            annotations=self._pdfpage.get(\'/Annots\') or []\n            has_widgets=annots and any(a.get_object().get(\'/Subtype\')==\'/Widget\' for a in annotations)\n            if has_widgets:\n                temp_document=pdfium.PdfDocument(self._doc.tobytes());temp_document.init_forms()\n                page.close();page=temp_document[self._number]\n                status=pdfium.raw.FPDFPage_Flatten(page,pdfium.raw.FLAT_NORMALDISPLAY)\n                if status==pdfium.raw.FLATTEN_FAIL:\n                    page.close();temp_document.close();raise ValueError(\'PDF form appearance could not be flattened for affine rendering\')\n                page.close();page=temp_document[self._number]\n            pixel_format=pdfium.raw.FPDFBitmap_BGRA if alpha else (pdfium.raw.FPDFBitmap_Gray if gray else pdfium.raw.FPDFBitmap_BGR)\n            bitmap=pdfium.PdfBitmap.new_native(width,height,format=pixel_format,rev_byteorder=True)\n            bitmap.fill_rect((255,255,255,0 if alpha else 255),0,0,width,height)\n            u=self._user_unit\n            native_matrix=pdfium.raw.FS_MATRIX(matrix.a*u,matrix.b*u,matrix.c*u,matrix.d*u,matrix.e-x0,matrix.f-y0)\n            native_clip=pdfium.raw.FS_RECTF(transformed.x0-x0,transformed.y0-y0,transformed.x1-x0,transformed.y1-y0)\n            render_flags=pdfium.raw.FPDF_REVERSE_BYTE_ORDER|(pdfium.raw.FPDF_ANNOT if annots else 0)|(pdfium.raw.FPDF_GRAYSCALE if gray else 0)\n            try:\n                pdfium.raw.FPDF_RenderPageBitmapWithMatrix(bitmap,page,ctypes.byref(native_matrix),ctypes.byref(native_clip),render_flags)\n                image=bitmap.to_pil().copy()\n            finally:\n                bitmap.close()\n                if temp_document is not None:\n                    page.close();temp_document.close()\n            mode=\'RGBA\' if alpha else (\'L\' if gray else \'RGB\')\n            image=image.convert(mode)\n            if clip is not None and (abs(matrix.b)>1e-10 or abs(matrix.c)>1e-10):\n                # A transformed clip is a parallelogram, not its enclosing box.\n                array=np.array(image);inverse=~matrix\n                yy,xx=np.indices((height,width),dtype=np.float32)\n                px=(xx+x0+.5)*inverse.a+(yy+y0+.5)*inverse.c+inverse.e\n                py=(xx+x0+.5)*inverse.b+(yy+y0+.5)*inverse.d+inverse.f\n                outside=(px<area.x0)|(px>=area.x1)|(py<area.y0)|(py>=area.y1)\n                boundary=(255,255,255,0) if alpha else ((255,255,255) if not gray else 255)\n                array[outside]=boundary;image=Image.fromarray(array,mode=mode)\n            if alpha and gray:image=image.convert(\'LA\')\n            return Pixmap(image,x0,y0)\n        finally:page.close()\n\n    def _characters(self,clip=None):\n        raw=pdfium.raw;page=self._pdfium_page();textpage=page.get_textpage();result=[]\n        font_names={};glyph_widths={}\n        clip=Rect(clip) if clip is not None else None\n        matrix=self.transformation_matrix\n        try:\n            for i in range(textpage.count_chars()):\n                code=raw.FPDFText_GetUnicode(textpage,i)\n                if not code:continue\n                char=chr(code)\n                if char in \'\\r\\n\':\n                    result.append({\'c\':char,\'break\':True});continue\n                try:\n                    left,bottom,right,top=textpage.get_charbox(i,loose=not TOOLS.small_glyph_heights)\n                except pdfium.PdfiumError:continue\n                box=Rect(left,bottom,right,top)*matrix\n                if clip is not None and not clip.contains(box):continue\n                ox,oy=ctypes.c_double(),ctypes.c_double()\n                origin=Point(left,bottom)\n                if raw.FPDFText_GetCharOrigin(textpage,i,ctypes.byref(ox),ctypes.byref(oy)):\n                    origin=Point(ox.value,oy.value)\n                origin=origin*matrix\n                flags=ctypes.c_int();needed=raw.FPDFText_GetFontInfo(textpage,i,None,0,ctypes.byref(flags))\n                font=\'Unknown\'\n                if needed:\n                    buffer=ctypes.create_string_buffer(needed)\n                    raw.FPDFText_GetFontInfo(textpage,i,buffer,needed,ctypes.byref(flags))\n                    font=buffer.value.decode(\'utf-8\',errors=\'replace\')\n                weight=raw.FPDFText_GetFontWeight(textpage,i)\n                spanflags=(8 if flags.value&1 else 0)|(4 if flags.value&2 else 0)|(2 if flags.value&64 else 0)|(16 if weight>=600 or \'bold\' in font.lower() else 0)\n                channels=[ctypes.c_uint() for _ in range(4)]\n                color=0\n                if raw.FPDFText_GetFillColor(textpage,i,*[ctypes.byref(v) for v in channels]):\n                    color=(channels[0].value<<16)|(channels[1].value<<8)|channels[2].value\n                angle=float(raw.FPDFText_GetCharAngle(textpage,i))\n                size=float(raw.FPDFText_GetFontSize(textpage,i))\n                char_matrix=raw.FS_MATRIX()\n                effective_scale=1.\n                width_scale=1.\n                if raw.FPDFText_GetMatrix(textpage,i,ctypes.byref(char_matrix)):\n                    effective_scale=math.hypot(char_matrix.c,char_matrix.d)\n                    width_scale=math.hypot(char_matrix.a,char_matrix.b)/max(effective_scale,1e-9)\n                obj=raw.FPDFText_GetTextObject(textpage,i)\n                objid=ctypes.cast(obj,ctypes.c_void_p).value if obj else 0\n                ascent,descent=ctypes.c_float(),ctypes.c_float()\n                fontobj=raw.FPDFTextObj_GetFont(obj) if obj else None\n                asc=(origin.y-box.y0)/max(size,1e-9);desc=(origin.y-box.y1)/max(size,1e-9)\n                family=font;advance=None\n                if fontobj:\n                    if raw.FPDFFont_GetAscent(fontobj,1.,ctypes.byref(ascent)):asc=ascent.value\n                    if raw.FPDFFont_GetDescent(fontobj,1.,ctypes.byref(descent)):desc=descent.value\n                    # The PDF resource/BaseFont may be an opaque CIDFont+F1.\n                    # Embedded program family names retain Gulim/Malgun etc.\n                    # Do not return the name of a substituted, unembedded font.\n                    if raw.FPDFFont_GetIsEmbedded(fontobj)==1:\n                        ident=ctypes.cast(fontobj,ctypes.c_void_p).value\n                        if ident not in font_names:\n                            needed=raw.FPDFFont_GetFamilyName(fontobj,None,0)\n                            if 1<needed<4096:\n                                buffer=ctypes.create_string_buffer(needed)\n                                raw.FPDFFont_GetFamilyName(fontobj,buffer,needed)\n                                font_names[ident]=buffer.value.decode(\'utf-8\',errors=\'replace\') or font\n                            else:font_names[ident]=font\n                        family=font_names[ident];key=(ident,code)\n                        if key not in glyph_widths:\n                            value=ctypes.c_float()\n                            glyph_widths[key]=value.value if raw.FPDFFont_GetGlyphWidth(fontobj,code,1.,ctypes.byref(value)) else None\n                        advance=glyph_widths[key]\n                result.append({\'c\':char,\'bbox\':tuple(box),\'origin\':tuple(origin),\'size\':size*effective_scale*self._user_unit,\'font\':font,\n                               \'ascender\':asc,\'descender\':desc,\'family\':family,\'advance_em\':advance,\'width_scale\':width_scale,\n                               \'flags\':spanflags,\'color\':color,\'angle\':angle,\'object\':objid,\'index\':i})\n            return result\n        finally:textpage.close();page.close()\n\n    def _text_lines(self,clip=None,sort=False):\n        chars=self._characters(clip);lines=[];line=[];last=None\n        for char in chars:\n            if char.get(\'break\'):\n                if line:lines.append(line);line=[]\n                last=None;continue\n            if last:\n                angle=char[\'angle\'];dx,dy=math.cos(angle),-math.sin(angle)\n                delta_x=char[\'origin\'][0]-last[\'origin\'][0];delta_y=char[\'origin\'][1]-last[\'origin\'][1]\n                baseline=abs(-dy*delta_x+dx*delta_y)\n                if baseline>max(1.,min(char[\'size\'],last[\'size\'])*.2) or abs(angle-last[\'angle\'])>.025:\n                    if line:lines.append(line);line=[]\n            line.append(char);last=char\n        if line:lines.append(line)\n        if sort:\n            lines.sort(key=lambda line:(round(min(c[\'bbox\'][1] for c in line),1),min(c[\'bbox\'][0] for c in line)))\n        return lines\n\n    def get_text(self,option=\'text\',clip=None,flags=None,sort=False,**kwargs):\n        lines=self._text_lines(clip,sort)\n        if option in (\'text\',\'\'):\n            return \'\'.join(\'\'.join(c[\'c\'] for c in line)+\'\\n\' for line in lines)\n        if option==\'words\':\n            words=[]\n            for ln,line in enumerate(lines):\n                current=[];wordno=0\n                def flush():\n                    nonlocal current,wordno\n                    if current:\n                        box=_union(c[\'bbox\'] for c in current)\n                        words.append((*box,\'\'.join(c[\'c\'] for c in current),ln,0,wordno));wordno+=1;current=[]\n                prev=None\n                for char in line:\n                    if char[\'c\'].isspace():flush();prev=None;continue\n                    if prev and char[\'bbox\'][0]-prev[\'bbox\'][2]>max(1.5,char[\'size\']*.25):flush()\n                    current.append(char);prev=char\n                flush()\n            return words\n        if option in (\'dict\',\'rawdict\'):\n            blocks=[]\n            for line in lines:\n                spans=[];current=[];previous=None\n                def flush():\n                    nonlocal current\n                    if not current:return\n                    first=current[0];bbox=_union(c[\'bbox\'] for c in current)\n                    span={k:first[k] for k in (\'size\',\'font\',\'flags\',\'color\')}\n                    span[\'family\']=first.get(\'family\',first[\'font\'])\n                    span.update(bbox=bbox,origin=first[\'origin\'],ascender=first[\'ascender\'],descender=first[\'descender\'])\n                    if option==\'rawdict\':span[\'chars\']=[{k:c[k] for k in (\'c\',\'bbox\',\'origin\',\'advance_em\',\'width_scale\')} for c in current]\n                    else:span[\'text\']=\'\'.join(c[\'c\'] for c in current)\n                    spans.append(span);current=[]\n                for char in line:\n                    key=(char[\'object\'],round(char[\'size\'],3),char[\'font\'],char[\'flags\'],char[\'color\'])\n                    if previous is not None and key!=previous:flush()\n                    current.append(char);previous=key\n                flush()\n                bbox=_union(c[\'bbox\'] for c in line);angle=line[0][\'angle\']\n                blocks.append({\'number\':len(blocks),\'type\':0,\'bbox\':bbox,\'lines\':[{\'bbox\':bbox,\'dir\':(math.cos(angle),-math.sin(angle)),\'wmode\':0,\'spans\':spans}]})\n            if flags is None or flags&TEXT_PRESERVE_IMAGES:\n                for image in self.get_image_info():\n                    blocks.append({\'number\':len(blocks),\'type\':1,\'bbox\':image[\'bbox\'],\'width\':image[\'width\'],\'height\':image[\'height\']})\n            return {\'width\':self._unrotated_rect.width,\'height\':self._unrotated_rect.height,\'blocks\':blocks}\n        if option==\'blocks\':\n            return [(*_union(c[\'bbox\'] for c in line),\'\'.join(c[\'c\'] for c in line)+\'\\n\',n,0) for n,line in enumerate(lines)]\n        raise ValueError(\'Unsupported extraction format: \'+str(option))\n    def get_textbox(self,rect):return self.get_text(\'text\',clip=Rect(rect),sort=True)\n\n    def _walk_objects(self,page):\n        raw=pdfium.raw\n        def walk(container,matrix,level=0):\n            count=raw.FPDFPage_CountObjects(container) if level==0 else raw.FPDFFormObj_CountObjects(container)\n            for i in range(count):\n                obj=raw.FPDFPage_GetObject(container,i) if level==0 else raw.FPDFFormObj_GetObject(container,i)\n                typ=raw.FPDFPageObj_GetType(obj)\n                local=raw.FS_MATRIX()\n                if not raw.FPDFPageObj_GetMatrix(obj,ctypes.byref(local)):raise ValueError(\'PDF object transform could not be read\')\n                om=Matrix(local.a,local.b,local.c,local.d,local.e,local.f)\n                yield obj,typ,matrix,om,level\n                if typ==raw.FPDF_PAGEOBJ_FORM and level<14:yield from walk(obj,om*matrix,level+1)\n        yield from walk(page,Matrix())\n\n    def get_image_info(self,hashes=False,xrefs=False):\n        raw=pdfium.raw;page=self._pdfium_page();images=[]\n        try:\n            for obj,typ,parent,matrix,level in self._walk_objects(page):\n                if typ!=raw.FPDF_PAGEOBJ_IMAGE:continue\n                bounds=[ctypes.c_float() for _ in range(4)]\n                if not raw.FPDFPageObj_GetBounds(obj,*[ctypes.byref(v) for v in bounds]):continue\n                box=Rect(bounds[0].value,bounds[1].value,bounds[2].value,bounds[3].value)*parent*self.transformation_matrix\n                width,height=ctypes.c_uint(),ctypes.c_uint()\n                raw.FPDFImageObj_GetImagePixelSize(obj,ctypes.byref(width),ctypes.byref(height))\n                metadata=raw.FPDF_IMAGEOBJ_METADATA()\n                actual={}\n                if raw.FPDFImageObj_GetImageMetadata(obj,page,ctypes.byref(metadata)):\n                    actual={\'colorspace\':metadata.colorspace,\'bits_per_pixel\':metadata.bits_per_pixel,\n                            \'xres\':metadata.horizontal_dpi,\'yres\':metadata.vertical_dpi}\n                images.append({\'number\':len(images),\'bbox\':tuple(box),\'width\':width.value,\'height\':height.value,\n                               \'transform\':tuple(matrix*parent*self.transformation_matrix),\'xref\':0,**actual})\n            return images\n        finally:page.close()\n    def get_images(self,full=False):\n        # Only presence and source dimensions are consumed by this viewer. Xref\n        # is intentionally 0 for direct/inline or nested PDFium image objects.\n        return [(0,0,i[\'width\'],i[\'height\'],8,\'DeviceRGB\',\'\',\'image\'+str(i[\'number\']),\'\',0) for i in self.get_image_info()]\n\n    def get_drawings(self,extended=False):\n        raw=pdfium.raw;page=self._pdfium_page();drawings=[]\n        try:\n            for obj,typ,parent,matrix,level in self._walk_objects(page):\n                if typ!=raw.FPDF_PAGEOBJ_PATH:continue\n                transform=matrix*parent*self.transformation_matrix\n                segments=[]\n                for i in range(raw.FPDFPath_CountSegments(obj)):\n                    seg=raw.FPDFPath_GetPathSegment(obj,i);x,y=ctypes.c_float(),ctypes.c_float()\n                    if not raw.FPDFPathSegment_GetPoint(seg,ctypes.byref(x),ctypes.byref(y)):continue\n                    point=Point(x.value,y.value)*transform\n                    segments.append((raw.FPDFPathSegment_GetType(seg),point,bool(raw.FPDFPathSegment_GetClose(seg))))\n                items=[];current=None;start=None;bezier=[]\n                for kind,point,closed in segments:\n                    if kind==raw.FPDF_SEGMENT_MOVETO:current=point;start=point;bezier=[]\n                    elif kind==raw.FPDF_SEGMENT_LINETO:\n                        if current is not None:items.append((\'l\',current,point))\n                        current=point\n                    elif kind==raw.FPDF_SEGMENT_BEZIERTO:\n                        bezier.append(point)\n                        if len(bezier)==3:\n                            if current is not None:items.append((\'c\',current,*bezier))\n                            current=bezier[-1];bezier=[]\n                    if closed and current is not None and start is not None:\n                        if current.distance_to(start)>.001:items.append((\'l\',current,start))\n                        current=start\n                if not items:continue\n                points=[p for item in items for p in item[1:] if isinstance(p,Point)]\n                box=Rect(min(p.x for p in points),min(p.y for p in points),max(p.x for p in points),max(p.y for p in points))\n                if len(items)==4 and all(item[0]==\'l\' for item in items) and all(abs(a.x-b.x)<.01 or abs(a.y-b.y)<.01 for _,a,b in items):\n                    items=[(\'re\',box,1)]\n                fillmode,stroke=ctypes.c_int(),ctypes.c_int();raw.FPDFPath_GetDrawMode(obj,ctypes.byref(fillmode),ctypes.byref(stroke))\n                color=[ctypes.c_uint() for _ in range(4)];fill=[ctypes.c_uint() for _ in range(4)];width=ctypes.c_float()\n                raw.FPDFPageObj_GetStrokeColor(obj,*[ctypes.byref(v) for v in color])\n                raw.FPDFPageObj_GetFillColor(obj,*[ctypes.byref(v) for v in fill]);raw.FPDFPageObj_GetStrokeWidth(obj,ctypes.byref(width))\n                drawings.append({\'items\':items,\'rect\':box,\'type\':\'fs\' if fillmode.value and stroke.value else (\'s\' if stroke.value else \'f\'),\n                                 \'color\':tuple(v.value/255 for v in color[:3]) if stroke.value else None,\n                                 \'fill\':tuple(v.value/255 for v in fill[:3]) if fillmode.value else None,\n                                 \'width\':width.value,\'closePath\':bool(segments and segments[-1][2]),\'even_odd\':fillmode.value==raw.FPDF_FILLMODE_ALTERNATE,\n                                 \'stroke_opacity\':color[3].value/255,\'fill_opacity\':fill[3].value/255})\n            return drawings\n        finally:page.close()\n\n    def find_tables(self,paths=None,strategy=\'lines\',**kwargs):\n        # Conservative ruled-grid detector. Unruled tables require a separate\n        # layout model and are not inferred from text alignment alone.\n        paths=self.get_drawings() if paths is None else paths;horizontal=[];vertical=[]\n        tolerance=float(kwargs.get(\'snap_tolerance\',2.))\n        def add(a,b):\n            if abs(a.y-b.y)<=tolerance and abs(a.x-b.x)>3:horizontal.append((round((a.y+b.y)/2,3),min(a.x,b.x),max(a.x,b.x)))\n            elif abs(a.x-b.x)<=tolerance and abs(a.y-b.y)>3:vertical.append((round((a.x+b.x)/2,3),min(a.y,b.y),max(a.y,b.y)))\n        for path in paths:\n            if strategy==\'lines_strict\' and path.get(\'type\')==\'f\':continue\n            for item in path[\'items\']:\n                if item[0]==\'l\':add(item[1],item[2])\n                elif item[0]==\'re\':\n                    r=Rect(item[1]);add(r.tl,r.tr);add(r.tr,r.br);add(r.br,r.bl);add(r.bl,r.tl)\n        if not horizontal or not vertical:return SimpleNamespace(tables=[])\n        def snap(values):\n            groups=[]\n            for value in sorted(values):\n                if groups and abs(value-sum(groups[-1])/len(groups[-1]))<=tolerance:groups[-1].append(value)\n                else:groups.append([value])\n            return [sum(group)/len(group) for group in groups]\n        xs=snap(v[0] for v in vertical);ys=snap(h[0] for h in horizontal)\n        if len(xs)<2 or len(ys)<2:return SimpleNamespace(tables=[])\n        def edge(lines,pos,a,b):\n            intervals=sorted((max(a,start),min(b,end)) for value,start,end in lines if abs(value-pos)<=tolerance and end>=a and start<=b)\n            covered=a\n            for start,end in intervals:\n                if start>covered+tolerance:return False\n                covered=max(covered,end)\n            return covered>=b-tolerance\n        cells=[]\n        for yi in range(len(ys)-1):\n            for xi in range(len(xs)-1):\n                x0,x1,y0,y1=xs[xi],xs[xi+1],ys[yi],ys[yi+1]\n                if all((edge(horizontal,y0,x0,x1),edge(horizontal,y1,x0,x1),edge(vertical,x0,y0,y1),edge(vertical,x1,y0,y1))):\n                    cells.append((xi,yi,(x0,y0,x1,y1)))\n        # Connected components prevent unrelated tables from becoming one huge grid.\n        tables=[];remaining={(x,y):box for x,y,box in cells}\n        while remaining:\n            first=next(iter(remaining));queue=[first];component={}\n            while queue:\n                item=queue.pop()\n                if item not in remaining:continue\n                component[item]=remaining.pop(item);x,y=item\n                queue.extend(((x-1,y),(x+1,y),(x,y-1),(x,y+1)))\n            x0,x1=min(x for x,y in component),max(x for x,y in component)\n            y0,y1=min(y for x,y in component),max(y for x,y in component)\n            if x1-x0+1<2 or y1-y0+1<2:continue\n            rows=[SimpleNamespace(cells=[component.get((x,y)) for x in range(x0,x1+1)]) for y in range(y0,y1+1)]\n            table=SimpleNamespace(bbox=_union(component.values()),row_count=len(rows),col_count=x1-x0+1,rows=rows,\n                                  cells=[cell for row in rows for cell in row.cells if cell is not None])\n            tables.append(table)\n        return SimpleNamespace(tables=tables)\n\n\ndef _union(boxes):\n    boxes=list(boxes)\n    if not boxes:return (0.,0.,0.,0.)\n    return (min(b[0] for b in boxes),min(b[1] for b in boxes),max(b[2] for b in boxes),max(b[3] for b in boxes))\n\n\n# Editing extensions use only PDFium, pypdf, ReportLab and the permitted Qt UI.\ntry:\n    import viewer_pdf_edit as _editing\nexcept ImportError as exc:\n    if exc.name!=\'viewer_pdf_edit\':raise\nelse:\n    _editing.install(Page,Document)\n    TextWriter=_editing.TextWriter\n\n\ndef _protect_backend_type(cls):\n    for name,value in list(vars(cls).items()):\n        if inspect.isfunction(value):\n            setattr(cls,name,_synchronized(value))\n        elif isinstance(value,property):\n            setattr(cls,name,property(_synchronized(value.fget) if value.fget else None,\n                                     _synchronized(value.fset) if value.fset else None,\n                                     _synchronized(value.fdel) if value.fdel else None,value.__doc__))\n\n_protect_backend_type(Document)\n_protect_backend_type(Page)\n_protect_backend_type(Font)\nif \'TextWriter\' in globals():_protect_backend_type(TextWriter)\n'
 
 import types as _viewer_module_types
@@ -37,6 +37,9 @@ import html
 import time
 import io
 import re
+import ast
+import difflib
+import tokenize
 from functools import lru_cache
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -44,7 +47,7 @@ from collections import OrderedDict
 from contextlib import contextmanager
 
 APP_NAME = 'The Viewer (정)'
-APP_VERSION = '3.13.15'
+APP_VERSION = '3.13.30'
 ENGINE_PROFILE = 'permissive-pdf'
 OFFICE_BUNDLED = False
 BLOG_URL = 'https://blog.naver.com/faintstar'
@@ -1261,7 +1264,7 @@ def input_worker():
 
 
 
-def editable_copy(path, number):
+def editable_copy(path, number, normalize_rotation=True):
     """페이지별 불변 작업 사본. 화면 좌표와 PDF 편집 좌표를 일치시킨다."""
     import viewer_pdf_engine
     if is_image_source(path):return image_page_document(path,number)
@@ -1269,7 +1272,7 @@ def editable_copy(path, number):
     try:
         with viewer_pdf_engine.open(path) as source:
             result.insert_pdf(source, from_page=number, to_page=number)
-        result[0].remove_rotation()
+        if normalize_rotation:result[0].remove_rotation()
         return result
     except Exception:
         result.close()
@@ -1621,6 +1624,7 @@ def validate_vector_strokes(strokes,width,height):
 def inspect_vector_objects(page,objects):
     import viewer_pdf_edit
     paths=viewer_pdf_edit.vector_paths(page);parents=list(range(len(paths)))
+    def strokes(path):return path.get('strokes',[path['stroke']])
     def root(i):
         while parents[i]!=i:parents[i]=parents[parents[i]];i=parents[i]
         return i
@@ -1639,21 +1643,21 @@ def inspect_vector_objects(page,objects):
         return min(p[0] for p in h)-1<=v[0][0]<=max(p[0] for p in h)+1 and min(p[1] for p in v)-1<=h[0][1]<=max(p[1] for p in v)+1
     # Bound the grouping cost for large illustrations. Individual paint paths
     # remain selectable even when the page contains thousands of segments.
-    if sum(len(p['stroke']['segments']) for p in paths)<=2500:
+    if sum(len(s['segments']) for p in paths for s in strokes(p))<=2500:
         for i,a in enumerate(paths):
             for j in range(i):
                 b=paths[j];ar,br=a['rect'],b['rect']
                 if ar[0]>br[2]+1 or br[0]>ar[2]+1 or ar[1]>br[3]+1 or br[1]>ar[3]+1:continue
-                if any(touch(x,y) for x in a['stroke']['segments'] for y in b['stroke']['segments']):parents[root(i)]=root(j)
+                if any(touch(x,y) for sa in strokes(a) for x in sa['segments'] for sb in strokes(b) for y in sb['segments']):parents[root(i)]=root(j)
     groups={}
     for i,path in enumerate(paths):groups.setdefault(root(i),[]).append(path)
     result=[]
     for group in groups.values():
-        strokes=[p['stroke'] for p in group];segments=[s for stroke in strokes for s in stroke['segments']]
+        group_strokes=[s for p in group for s in strokes(p)];segments=[s for stroke in group_strokes for s in stroke['segments']]
         horizontal={round(sum(p[1] for p in s)/2,1) for s in segments if axis(s)=='h'}
         vertical={round(sum(p[0] for p in s)/2,1) for s in segments if axis(s)=='v'}
         shape=('line' if len(segments)==1 else 'table' if len(horizontal)>=2 and len(vertical)>=2 and len(horizontal)+len(vertical)>4 else 'frame')
-        result.append({'kind':'vector','shape':shape,'rect':vector_bounds(strokes),'strokes':strokes,
+        result.append({'kind':'vector','shape':shape,'rect':vector_bounds(group_strokes),'strokes':group_strokes,
                        'native_paths':[{'id':p['id'],'signature':p['signature']} for p in group]})
     result.extend(o for o in objects if o['kind']=='vector')
     return result
@@ -1701,7 +1705,7 @@ def edit_vector_parts(page,operation):
     for record in records:viewer_pdf_edit.append_editor_object(page,record,lambda layer,r=record:viewer_pdf_edit.draw_vector_object(layer,r))
 
 
-def rebase_batch_operation(path,number,operation):
+def rebase_batch_operation(path,number,operation,original=None):
     """Resolve native occurrence addresses again after each staged edit."""
     operation=json.loads(json.dumps(operation));kind=operation['kind']
     if kind.startswith('image_') and kind not in ('image_add',):
@@ -1715,11 +1719,16 @@ def rebase_batch_operation(path,number,operation):
             page=doc[0];paths=viewer_pdf_edit.vector_paths(page)
             parent=operation['parent_vector'] if kind=='vector_parts' else operation
             if kind!='vector_parts' or not parent.get('object_id'):
-                evidence=[]
+                evidence=[];source_paths=None
                 for old in parent.get('native_paths',[]):
                     hits=[p for p in paths if p['signature']==old['signature']]
-                    same=[p for p in hits if p['id']==old['id']]
-                    hits=same or hits
+                    if hits:
+                        same=[p for p in hits if p['id']==old['id']];hits=same or hits
+                    elif original is not None:
+                        if source_paths is None:
+                            with editable_copy(*original) as source:source_paths=viewer_pdf_edit.vector_paths(source[0])
+                        proven=[p for p in source_paths if p['id']==old['id'] and p['signature']==old['signature']]
+                        if len(proven)==1:hits=[p for p in paths if viewer_pdf_edit.same_vector_path(proven[0],p)]
                     if len(hits)!=1:raise ValueError('선 선택이 겹치거나 변경되었습니다. 원본은 변경되지 않았습니다.')
                     evidence.append({'id':hits[0]['id'],'signature':hits[0]['signature']})
                 parent['native_paths']=evidence
@@ -1732,7 +1741,7 @@ def apply_edit_batch(path,number,operation,output):
     with tempfile.TemporaryDirectory(prefix='TheViewerBatch_') as work:
         current=path;page_number=number
         for i,op in enumerate(operations):
-            op=rebase_batch_operation(current,page_number,op)
+            op=rebase_batch_operation(current,page_number,op,original=(path,number))
             destination=str(Path(work)/(str(i)+'.pdf'))
             apply_page_edit(current,page_number,op,destination);current=destination;page_number=0
         target=Path(output);target.parent.mkdir(parents=True,exist_ok=True)
@@ -1865,6 +1874,8 @@ def insert_editor_text(page, rect, operation):
             if len(source)!=1 or source.needs_pass:raise ValueError('복사한 글상자의 원본을 읽지 못했습니다.')
             page.show_pdf_page(source[0].rect,source,0,keep_proportion=False)
         return
+    if operation.get('page_number_owner')==PAGE_NUMBER_OWNER and '\n' not in operation.get('text',''):
+        return insert_page_number_text(page,rect,operation)
     content,css=editor_text_content(operation)
     spare,scale=page.insert_htmlbox(rect,content,css=css,
         scale_low=1 if operation.get('strict_size') else .5,rotate=operation.get('rotate',0))
@@ -2052,6 +2063,160 @@ def apply_page_edit(path, number, operation, output):
     return str(output)
 
 
+PAGE_NUMBER_OWNER = 'TheViewer/page-number/v1'
+PAGE_NUMBER_DEFAULTS = {'x':50.0,'y':95.0,'font':'','size':11.0,'bold':False,
+                        'color':'#111111','prefix':'','suffix':'','start':1,'digits':1}
+
+
+def page_number_options(values=None):
+    values={**PAGE_NUMBER_DEFAULTS,**(values or {})}
+    result={}
+    for name,minimum,maximum in [('x',0,100),('y',0,100),('size',4,144)]:
+        value=float(values[name])
+        if not math.isfinite(value) or not minimum<=value<=maximum:
+            raise ValueError('쪽번호 위치는 0~100, 크기는 4~144 pt로 지정하세요.')
+        result[name]=round(value,2)
+    for name,minimum,maximum in [('start',0,999999),('digits',1,6)]:
+        value=int(values[name])
+        if value!=float(values[name]) or not minimum<=value<=maximum:
+            raise ValueError('쪽번호 시작 번호와 자릿수를 확인하세요.')
+        result[name]=value
+    for name in ('prefix','suffix'):
+        value=values[name]
+        if not isinstance(value,str) or len(value)>40 or any(c in value for c in '\r\n\t'):
+            raise ValueError('번호 양쪽 장식은 한 줄에 40자까지 입력하세요.')
+        result[name]=value
+    color=values['color']
+    if not isinstance(color,str) or not re.fullmatch(r'#[0-9a-fA-F]{6}',color):
+        raise ValueError('쪽번호 색상을 확인하세요.')
+    result.update(font=safe_font_family(str(values['font'])),bold=bool(values['bold']),color=color)
+    return result
+
+
+def page_number_layout(operation):
+    # Separate numeric runs in Qt PDF output. Some CJK fonts otherwise omit
+    # the digits' ToUnicode entries when they follow a Latin prefix.
+    parts=[];x=0.;baseline=0.
+    for text in re.findall(r'[0-9]+|[^0-9]+',operation.get('text','')):
+        measured=editor_text_layout({**operation,'text':text})
+        parts.append({'text':text,'x':x,**measured});x+=measured['width']
+        baseline=max(baseline,measured['baseline'])
+    height=0.
+    for part in parts:
+        part['y']=baseline-part['baseline'];height=max(height,part['y']+part['height'])
+    return {'parts':parts,'width':x,'height':height}
+
+
+def insert_page_number_text(page,rect,operation):
+    import viewer_pdf_engine
+    turn=int(operation.get('rotate',0))%360
+    width,height=(rect.height,rect.width) if turn in (90,270) else (rect.width,rect.height)
+    layout=page_number_layout(operation)
+    if layout['width']>width+.01 or layout['height']>height+.01:
+        raise ValueError('쪽번호가 글상자 안에 들어가지 않습니다. 영역을 넓히거나 크기를 줄여주세요.')
+    with viewer_pdf_engine.open() as document:
+        layer=document.new_page(width=width,height=height)
+        for part in layout['parts']:
+            content,css=editor_text_content({**operation,'text':part['text']})
+            area=viewer_pdf_engine.Rect(part['x'],part['y'],part['x']+part['width']+1.,part['y']+part['height']+.5)
+            spare,_scale=layer.insert_htmlbox(area,content,css=css,scale_low=1)
+            if spare<0:raise ValueError('쪽번호를 지정한 크기로 출력하지 못했습니다.')
+        page.show_pdf_page(rect,document,0,rotate=turn,keep_proportion=False)
+
+
+def page_number_record(options,index,width,height):
+    options=page_number_options(options)
+    text=options['prefix']+str(options['start']+int(index)).zfill(options['digits'])+options['suffix']
+    record={'kind':'text','text':text,'font':options['font'],'size':options['size'],
+            'bold':options['bold'],'color':options['color'],'align':'left','rotate':0,
+            'strict_size':True,'text_frame':True,'object_id':uuid.uuid4().hex,
+            'page_number_owner':PAGE_NUMBER_OWNER,'page_number_value':options['start']+int(index)}
+    measured=page_number_layout(record)
+    w,h=measured['width']+1.5,measured['height']+1.0
+    if width<=0 or height<=0 or w>width or h>height:
+        raise ValueError('쪽번호가 페이지보다 큽니다. 글자 크기나 양쪽 장식을 줄여주세요.')
+    x=max(0.,min(width-w,width*options['x']/100-w/2))
+    y=max(0.,min(height-h,height*options['y']/100-h/2))
+    record['rect']=[x,y,x+w,y+h]
+    return record
+
+
+def remove_viewer_page_numbers(page):
+    import viewer_pdf_edit
+    records=viewer_pdf_edit.editor_objects(page)
+    ids={r['object_id'] for r in records if r.get('page_number_owner')==PAGE_NUMBER_OWNER}
+    if not ids:return 0
+    blocks=viewer_pdf_edit._editor_blocks(page)
+    viewer_pdf_edit._set_operations(page,[op for identity,ops in blocks if identity not in ids for op in ops])
+    viewer_pdf_edit._set_editor_records(page,[r for r in records if r['object_id'] not in ids])
+    return len(ids)
+
+
+def apply_page_batch(payload):
+    """Create every replacement first; a failed batch never updates any page."""
+    import viewer_pdf_engine
+    import viewer_pdf_edit
+    from pypdf import PdfReader
+    kind=payload['kind'];entries=payload['entries'];created=[];replacements=[];count=0;sources=OrderedDict()
+    if kind not in ('rotate','page_numbers','delete_page_numbers') or not entries:
+        raise ValueError('변경할 페이지를 선택하세요.')
+    if len({entry['uid'] for entry in entries})!=len(entries):raise ValueError('페이지 선택이 중복되었습니다.')
+    if kind=='page_numbers':
+        _viewer_conversion_app();options=page_number_options(payload.get('options'))
+    turn=int(payload.get('turn',0))
+    if kind=='rotate' and turn not in (-90,90):raise ValueError('회전 방향을 확인하세요.')
+    try:
+        for index,entry in enumerate(entries):
+            card=int(entry.get('document_pages',0))
+            if card and kind!='delete_page_numbers':raise ValueError('PDF 카드의 전체 문서를 연 뒤 페이지를 선택하세요.')
+            if card:document=viewer_pdf_engine.open(entry['path'])
+            elif is_image_source(entry['path']):document=image_page_document(entry['path'],entry['number'])
+            else:
+                # Reuse one lazy reader instead of serializing the entire source
+                # for every selected page in a large numbering/rotation batch.
+                if entry['path'] not in sources:
+                    reader=PdfReader(entry['path'])
+                    if reader.is_encrypted and not reader.decrypt(''):raise ValueError('암호가 없는 PDF 파일을 선택하세요.')
+                    sources[entry['path']]=reader
+                sources.move_to_end(entry['path'])
+                while len(sources)>4:sources.popitem(last=False)
+                reader=sources[entry['path']]
+                number=int(entry['number'])
+                if not 0<=number<len(reader.pages):raise ValueError('변경할 PDF 페이지를 찾지 못했습니다.')
+                document=viewer_pdf_engine.open();document._writer.add_page(reader.pages[number])
+            with document as doc:
+                if doc.needs_pass:raise ValueError('암호가 없는 PDF 파일을 선택하세요.')
+                changed=0
+                for page in doc:
+                    if kind=='rotate':
+                        page.set_rotation((page.rotation+turn)%360);changed+=1
+                    elif kind=='page_numbers':
+                        remove_viewer_page_numbers(page)
+                        record=page_number_record(options,index,page.rect.width,page.rect.height)
+                        rotation=page.rotation
+                        if rotation:
+                            record['rect']=list(viewer_pdf_engine.Rect(record['rect'])*page.derotation_matrix)
+                            record['rotate']=rotation;page.set_rotation(0)
+                        try:
+                            viewer_pdf_edit.append_editor_object(page,record,
+                                lambda layer,r=record:insert_editor_text(layer,viewer_pdf_engine.Rect(r['rect']),r))
+                        finally:
+                            if rotation:page.set_rotation(rotation)
+                        changed+=1
+                    else:changed+=remove_viewer_page_numbers(page)
+                if not changed:continue
+                output=Path(entry['output']);output.parent.mkdir(parents=True,exist_ok=True)
+                data=doc.tobytes(garbage=4,deflate=True)
+                with output.open('xb') as stream:
+                    created.append(output);stream.write(data)
+                replacements.append({'uid':entry['uid'],'path':str(output),'number':0})
+                count+=changed
+        return {'replacements':replacements,'count':count}
+    except Exception:
+        for path in created:path.unlink(missing_ok=True)
+        raise
+
+
 def pdf_worker():
     """Qt와 분리된 단일 PDF 프로세스. PDFium를 여러 스레드에서 호출하지 않는다."""
     import viewer_pdf_engine
@@ -2062,6 +2227,10 @@ def pdf_worker():
         request = {}
         try:
             request = json.loads(line)
+            if request['op']=='page_batch':
+                result=apply_page_batch(request['payload'])
+                sys.stdout.buffer.write((json.dumps({'id':request['id'],'ok':True,'batch':result},ensure_ascii=True)+'\n').encode('ascii'))
+                sys.stdout.buffer.flush();continue
             if request['op']=='release':
                 for cached in documents.values():cached.close()
                 documents.clear()
@@ -4106,6 +4275,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QColor, QPainter, QPen, QBrush, QConicalGradient, QLinearGradient, QRegion,
     QDesktopServices, QPixmap, QDrag, QCursor, QFont, QIcon, QPainterPath, QKeySequence, QShortcut, QTransform, QImage, QImageReader, QMovie,
+    QSyntaxHighlighter, QTextCharFormat, QTextCursor, QTextFormat, QFontDatabase, QPalette,
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QAbstractScrollArea, QToolButton,
@@ -4113,7 +4283,7 @@ from PySide6.QtWidgets import (
     QPushButton, QDialogButtonBox, QFileDialog, QMessageBox, QInputDialog,
     QLineEdit, QToolTip, QLabel, QGraphicsView, QGraphicsScene, QMenu, QSizePolicy,
     QPlainTextEdit, QTextEdit, QDoubleSpinBox, QSpinBox, QHBoxLayout, QTableWidget, QFontComboBox,
-    QHeaderView, QColorDialog, QWidget, QTabWidget, QProgressBar, QScrollArea, QSplitter, QSplitterHandle, QKeySequenceEdit, QTableWidgetItem,
+    QHeaderView, QColorDialog, QWidget, QTabWidget, QProgressBar, QScrollArea, QSplitter, QSplitterHandle, QKeySequenceEdit, QTableWidgetItem, QCompleter,
 )
 
 MIME = 'application/x-krs-pdf-pages-v2'
@@ -5135,6 +5305,7 @@ class PdfBackend(QObject):
     preview = Signal(int, object, str)
     editInfo = Signal(int, object, str)
     edited = Signal(int, str, str)
+    pageBatchDone = Signal(int, object, str)
     siblingReady = Signal(int, str, str)
     neighborsReady = Signal(int, object, str)
     released = Signal()
@@ -5150,6 +5321,7 @@ class PdfBackend(QObject):
         self.serial = 0
         self.active = None
         self.jobs = []
+        self.render_paused = False
         self.closing = False
         self.worker_flag=worker_flag;self.lazy=lazy
         self.proc.started.connect(self.pump)
@@ -5169,13 +5341,17 @@ class PdfBackend(QObject):
 
     def set_thumbnail_order(self, keys):
         rank = {key: i for i, key in enumerate(keys)}
-        self.jobs.sort(key=lambda j: -1 if j['op'] == 'inspect' else rank.get((j['path'], j['page']), 100000))
+        self.jobs.sort(key=lambda j: (0 if j['op']=='release' else 1 if j['op']=='inspect'
+            else 2 if j['op']!='render' else 3,rank.get((j['path'],j['page']),100000)))
 
     def pump(self):
-        if self.lazy and self.jobs and self.proc.state()==QProcess.ProcessState.NotRunning and not self.closing:
+        if self.closing:return
+        eligible=next((i for i,j in enumerate(self.jobs) if not self.render_paused or j['op']!='render'),None)
+        if eligible is None:return
+        if self.lazy and self.proc.state()==QProcess.ProcessState.NotRunning:
             executable,arguments=worker_launch(self.worker_flag);self.proc.start(executable,arguments)
-        if self.active is None and self.jobs and self.proc.state() == QProcess.ProcessState.Running:
-            self.active = self.jobs.pop(0)
+        if self.active is None and self.proc.state() == QProcess.ProcessState.Running:
+            self.active = self.jobs.pop(eligible)
             self.proc.write((json.dumps(self.active, ensure_ascii=True)+'\n').encode('ascii'))
 
     def read_output(self):
@@ -5190,6 +5366,8 @@ class PdfBackend(QObject):
             if not job or result.get('id') != job['id']:
                 continue
             self.active = None
+            if job.get('discarded'):
+                self.pump();continue
             error = '' if result.get('ok') else result.get('error', 'PDF 처리 실패')
             if job['op']=='release':
                 self.released.emit()
@@ -5203,6 +5381,8 @@ class PdfBackend(QObject):
                 self.editInfo.emit(job['token'], result.get('info', {}), error)
             elif job['op'] == 'edit':
                 self.edited.emit(job['token'], result.get('path', ''), error)
+            elif job['op'] == 'page_batch':
+                self.pageBatchDone.emit(job['token'], result.get('batch', {}), error)
             else:
                 pix = QPixmap()
                 if not error:
@@ -5220,6 +5400,7 @@ class PdfBackend(QObject):
         jobs = ([self.active] if self.active else []) + self.jobs
         self.active, self.jobs = None, []
         for job in jobs:
+            if job.get('discarded'):continue
             if job['op']=='release':
                 self.released.emit()
             elif job['op'] == 'inspect':
@@ -5234,6 +5415,8 @@ class PdfBackend(QObject):
                 self.editInfo.emit(job['token'], {}, 'PDF 편집 정보를 읽지 못했습니다.')
             elif job['op'] == 'edit':
                 self.edited.emit(job['token'], '', 'PDF 편집 프로세스가 종료되었습니다.')
+            elif job['op'] == 'page_batch':
+                self.pageBatchDone.emit(job['token'], {}, 'PDF 일괄 편집 프로세스가 종료되었습니다.')
             else:
                 self.thumbnail.emit(job['path'], job['page'], QPixmap(), 'PDF 처리 프로세스가 종료되었습니다.')
 
@@ -5367,6 +5550,220 @@ class ImageBackend(PdfBackend):
 
     def stop(self):
         self.cancel_timer.stop();super().stop()
+
+
+class ReadingRenderScheduler(QObject):
+    """Show the current page first, then warm only the next reading position.
+
+    Reuse warm image workers, preparing both next images together in dual view.
+    A requested page can adopt an in-flight image instead of decoding it again.
+    Cached pixmaps retain original colours; each view applies its reading palette.
+    """
+    CACHE_BYTES=64*1024*1024
+    CACHE_PAGES=4
+
+    def __init__(self,owner):
+        super().__init__(owner)
+        self.owner=owner;self.sessions={};self.cache=OrderedDict()
+        self.image_readers=[]
+        self.prefetch={};self.serial=0;self.failed_keys=set();self.opening=False;self.closing=False
+        self.timer=QTimer(self);self.timer.setSingleShot(True);self.timer.setInterval(35)
+        self.timer.timeout.connect(self.sync)
+        for engine in self.engines():engine.preview.connect(self.got_prefetch)
+
+    def engines(self):return (self.owner.backend,self.owner.image_backend,*self.image_readers)
+
+    def attach_image_reader(self,engine):
+        if engine in self.engines():return
+        self.image_readers.append(engine);engine.preview.connect(self.got_prefetch)
+
+    def discard_active(self,engine):
+        if engine.active is None or engine.active['op']=='release':return
+        engine.active['discarded']=True
+        timer=getattr(engine,'cancel_timer',None)
+        if timer is not None and not timer.isActive():timer.start()
+
+    def cancel_image_preview(self,editor):
+        # Another view may be waiting for a prefetch on this view's reader.
+        engine=editor.image_backend
+        protected={token for token,job in self.prefetch.items() if job['engine'] is engine}
+        engine.jobs=[j for j in engine.jobs if j['op']=='release' or j['token'] in protected]
+        if engine.active is not None and engine.active['token'] not in protected:self.discard_active(engine)
+
+    def claim_image(self,editor,side,token):
+        if not is_image_source(editor.page.path):return False
+        key=self.page_key(editor.page)
+        for job in self.prefetch.values():
+            if job['key']==key and job['side']>=side:
+                job.setdefault('waiters',{})[editor]=token;return True
+        return False
+
+    def page_key(self,page):
+        picture=is_image_source(page.path)
+        try:
+            filename=image_source_info(page.path)['file'] if picture else page.path
+            stamp=Path(filename).stat()
+        except (OSError,ValueError,KeyError):return None
+        return (page.path,page.number,stamp.st_size,stamp.st_mtime_ns,
+                self.owner.image_engine if picture else 'pdf')
+
+    def lookup(self,page,side=0):
+        key=self.page_key(page);entry=self.cache.get(key)
+        if entry is None or entry['side']<side:return None
+        self.cache.move_to_end(key);return entry['pix']
+
+    def remember(self,key,pix,side):
+        if key is None or pix.isNull():return
+        cost=pix.width()*pix.height()*4
+        if cost>self.CACHE_BYTES:return
+        old=self.cache.get(key)
+        if old is None or side>=old['side']:
+            self.cache[key]={'pix':QPixmap(pix),'side':side,'bytes':cost}
+        self.cache.move_to_end(key)
+        while len(self.cache)>self.CACHE_PAGES or sum(e['bytes'] for e in self.cache.values())>self.CACHE_BYTES:
+            self.cache.popitem(last=False)
+
+    def pause_thumbnails(self,paused):
+        for engine in self.engines():
+            engine.render_paused=paused
+            if not paused and not self.closing:engine.pump()
+
+    def cancel_prefetch(self,keep_keys=()):
+        keep=set(keep_keys)
+        self.prefetch={token:job for token,job in self.prefetch.items() if job['key'] in keep}
+        protected=set(self.prefetch)
+        for engine in self.engines():
+            engine.jobs=[j for j in engine.jobs if not j.get('payload',{}).get('reading_prefetch') or j['token'] in protected]
+            if (engine.active and engine.active.get('payload',{}).get('reading_prefetch') and
+                    engine.active['token'] not in protected):self.discard_active(engine)
+
+    def expect_open(self):
+        if self.closing:return
+        self.opening=True;self.pause_thumbnails(True)
+
+    def begin(self,editor,side,token):
+        if self.closing:return
+        self.timer.stop();self.pause_thumbnails(True)
+        for job in self.prefetch.values():job.get('waiters',{}).pop(editor,None)
+        editors=self.active_editors()
+        keep={self.page_key(editor.page)}|{self.page_key(e.page) for e in editors}
+        keep.update(key for _page,key,_side in self.next_targets(editors))
+        self.cancel_prefetch(keep)
+        self.opening=False;self.failed_keys.clear()
+        self.sessions[editor]={'key':self.page_key(editor.page),'side':side,'token':token,'pending':True}
+
+    def complete(self,editor,token,pix,error):
+        if self.closing:return
+        session=self.sessions.get(editor)
+        if session is None or token!=session['token']:return
+        session['pending']=False
+        if not error and self.page_key(editor.page)==session['key']:
+            self.remember(session['key'],pix,session['side'])
+        if is_image_source(editor.page.path):self.sync()
+        else:self.schedule()
+
+    def schedule(self):
+        if not self.closing:self.timer.start()
+
+    def detach(self,editor):
+        self.sessions.pop(editor,None)
+        engine=getattr(editor,'image_backend',None)
+        if engine in self.image_readers:
+            retry=[]
+            for token,job in list(self.prefetch.items()):
+                job.get('waiters',{}).pop(editor,None)
+                if job['engine'] is not engine:continue
+                for waiter,current in job.get('waiters',{}).items():
+                    session=self.sessions.get(waiter)
+                    if session and session['pending'] and session['token']==current and session['key']==job['key']:
+                        retry.append(waiter)
+                self.prefetch.pop(token)
+            self.cancel_image_preview(editor)
+            self.image_readers.remove(engine);engine.preview.disconnect(self.got_prefetch)
+            for waiter in retry:
+                waiter.requested_side=0;QTimer.singleShot(0,waiter.request_image)
+        self.schedule()
+
+    def active_editors(self):
+        owner=self.owner
+        editors=[getattr(owner,'preview_dialog',None)]
+        if getattr(owner,'dual_mode',False):editors.append(getattr(owner,'dual_preview',None))
+        return [e for e in editors if e is not None and not e.closed and not e.book_blank]
+
+    def next_targets(self,editors):
+        visible={self.page_key(e.page) for e in editors};targets=[];seen=set()
+        step=2 if self.owner.book_mode and self.owner.book_step==2 else 1
+        for editor in editors:
+            pages=editor.navigation_pages()
+            index=next((i for i,p in enumerate(pages) if p.uid==editor.page.uid),None)
+            if index is None or index+step>=len(pages):continue
+            page=pages[index+step];key=self.page_key(page)
+            if key is None or key in visible or key in seen:continue
+            seen.add(key)
+            if is_image_source(page.path):
+                viewport=editor.view.viewport()
+                side=min(2048,max(256,math.ceil(max(viewport.width(),viewport.height())*
+                                               editor.view.devicePixelRatioF()/64)*64))
+            else:side=1800
+            targets.append((page,key,side))
+        return targets
+
+    def sync(self):
+        if self.closing:return
+        editors=self.active_editors()
+        self.sessions={e:s for e,s in self.sessions.items() if e in editors}
+        if self.opening or any(self.sessions.get(e,{}).get('pending',not e.preview_ready) for e in editors):
+            self.pause_thumbnails(True);return
+        targets=self.next_targets(editors)
+        allowed={self.page_key(e.page) for e in editors}|{key for _,key,_ in targets}
+        for key in list(self.cache):
+            if key not in allowed:self.cache.pop(key)
+        needed=[(p,k,s) for p,k,s in targets if self.lookup(p,s) is None and k not in self.failed_keys]
+        if not needed:
+            self.cancel_prefetch();self.pause_thumbnails(False);return
+        self.pause_thumbnails(True)
+        busy={job['engine'] for job in self.prefetch.values()}
+        queued={job['key'] for job in self.prefetch.values()}
+        limit=2 if self.owner.dual_mode else 1
+        for page,key,side in needed:
+            if key in queued or len(self.prefetch)>=limit:continue
+            if is_image_source(page.path):
+                readers=[e for e in (*self.image_readers,self.owner.image_backend) if e not in busy and
+                         (e.active is None or e.active.get('discarded'))]
+                if not readers:self.schedule();continue
+                # Avoid starting a second interpreter for a page an idle reader can decode.
+                readers.sort(key=lambda e:bool(getattr(e,'proc',None) is not None and
+                    e.proc.state()!=QProcess.ProcessState.Running))
+                engine=readers[0]
+            else:
+                engine=self.owner.backend
+                if engine in busy:continue
+            self.serial+=1;token=-self.serial
+            self.prefetch[token]={'key':key,'page':page,'side':side,'engine':engine,'waiters':{}}
+            busy.add(engine);queued.add(key)
+            engine.request('preview',page.path,page.number,token=token,priority=True,max_side=side,
+                           payload={'reading_prefetch':True})
+
+    def got_prefetch(self,token,pix,error):
+        if self.closing:return
+        job=self.prefetch.pop(token,None)
+        if job is None:return
+        if self.page_key(job['page'])==job['key']:
+            if error or pix.isNull():self.failed_keys.add(job['key'])
+            else:self.remember(job['key'],pix,job['side'])
+        else:pix=QPixmap();error='원본 그림이 변경되었습니다. 파일을 다시 열어주세요.'
+        for editor,current in list(job.get('waiters',{}).items()):
+            session=self.sessions.get(editor)
+            if (not editor.closed and session and session['pending'] and session['token']==current and
+                    session['key']==job['key']):editor.got_image(current,pix,error)
+        self.schedule()
+
+    def reset(self):
+        self.timer.stop();self.cancel_prefetch();self.sessions.clear();self.cache.clear()
+        self.failed_keys.clear();self.opening=False;self.pause_thumbnails(False)
+
+    def stop(self):
+        self.closing=True;self.timer.stop();self.cancel_prefetch();self.sessions.clear();self.cache.clear()
 
 
 class ExplorerTarget:
@@ -6660,6 +7057,20 @@ def draw_empty_drop_mark(painter, rect, dark=False, active=False):
     painter.drawPath(compact_plus_path(QRectF(76,24,60,60)));painter.restore()
 
 
+def donation_coffee_icon():
+    pix=QPixmap(72,72);pix.fill(Qt.GlobalColor.transparent)
+    painter=QPainter(pix);painter.setRenderHint(QPainter.RenderHint.Antialiasing);painter.scale(3,3)
+    painter.setPen(QPen(QColor('#ffffff'),1.5));painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawEllipse(QRectF(16,9,5,6))
+    painter.setBrush(QColor('#ffffff'));painter.drawRoundedRect(QRectF(4,8,13,11),3,3)
+    painter.setPen(Qt.PenStyle.NoPen);painter.setBrush(QColor('#6b452e'));painter.drawEllipse(QRectF(5.3,8.2,10.4,3))
+    painter.setPen(QPen(QColor('#ffffff'),1.5));painter.drawLine(QPointF(3,21),QPointF(19,21))
+    painter.setPen(QPen(QColor('#d8ebff'),1.2));painter.setBrush(Qt.BrushStyle.NoBrush)
+    for x in (8,12):
+        steam=QPainterPath(QPointF(x,6));steam.cubicTo(x-2,4,x+2,3,x,1.5);painter.drawPath(steam)
+    painter.end();return QIcon(pix)
+
+
 def application_icon():
     """내장 ICO의 PNG 프레임을 읽어 Qt/Windows에서 같은 아이콘을 사용한다."""
     global _APPLICATION_ICON
@@ -7004,6 +7415,10 @@ class ShortcutBindings(QObject):
         modal=QApplication.activeModalWidget()
         if modal is not None and modal is not editor:return ''
         if QApplication.activePopupWidget() is not None:return ''
+        if (owner.book_focus and event.key()==Qt.Key.Key_Escape and
+                event.modifiers()==Qt.KeyboardModifier.NoModifier and
+                widget is not None and (widget is owner or owner.isAncestorOf(widget))):
+            return 'exit_book_focus'
         if (in_preview and not text_input and editor.mode=='edit' and
                 (editor.selected_text or editor.selected_image or editor.selected_vector or editor.bulk_items or editor.bulk_restore or editor.restore_selection or editor.restore_image or editor.restore_vector) and
                 event.key() in (Qt.Key.Key_Left,Qt.Key.Key_Right,Qt.Key.Key_Up,Qt.Key.Key_Down)):
@@ -7045,6 +7460,11 @@ class ShortcutBindings(QObject):
 
     def execute(self,action,widget,steps=1,event=None,zoom_position=None):
         owner=self.owner;editor,in_preview,_=self.context(widget)
+        if action=='exit_book_focus':owner.set_book_focus(False);return
+        if getattr(owner,'page_batch_job',None) is not None and action not in ('zoom_in','zoom_out'):return
+        if (getattr(owner,'page_number_session',None) is not None and in_preview and
+                action in ('previous_file','next_file','previous_page','next_page','move_object','copy','cut','paste','delete')):return
+        if getattr(owner,'page_number_session',None) is not None and action in ('select_all','paste','delete'):return
         if editor is not None and editor.dual_secondary and action in ('copy','cut','paste','delete'):
             QToolTip.showText(QCursor.pos(),'오른쪽 보기는 읽기 전용입니다.',editor.view);return
         if action=='move_object':editor.handle_move_key(event)
@@ -7079,6 +7499,9 @@ class ShortcutBindings(QObject):
 
     def eventFilter(self,watched,event):
         if event.type() not in (QEvent.Type.ShortcutOverride,QEvent.Type.KeyPress) or not isinstance(watched,QWidget):return False
+        if (watched is getattr(self.owner,'book_gap_handle',None) and
+                event.key() in (Qt.Key.Key_Left,Qt.Key.Key_Right,Qt.Key.Key_Escape) and
+                not event.modifiers()&Qt.KeyboardModifier.ControlModifier):return False
         editor=self.owner.preview_dialog
         if watched.window() is not self.owner and (editor is None or watched.window() is not editor):return False
         if event.type()==QEvent.Type.ShortcutOverride:
@@ -8166,6 +8589,7 @@ class EndOfContainerOverlay(QWidget):
         _origin,containers,_library=owner.navigation_context()
         visible=(not editor.closed and editor.mode=='pan' and containers and self.container and bool(owner.pages) and
                  (at_start or index==len(editor.navigation_pages())-1) and not owner.clear_pending and
+                 not owner.book_focus and
                  not (owner.pending_import or owner.imports or owner.import_cancelling))
         self.setVisible(visible)
         if not visible:return
@@ -8401,6 +8825,223 @@ class SafeFontCombo(QComboBox):
     def setCurrentFont(self,font):self.setCurrentText(safe_font_family(font.family()))
 
 
+class PageNumberDesignDialog(QDialog):
+    def __init__(self,parent,options):
+        super().__init__(parent);self.options=dict(options)
+        self.setWindowTitle('쪽번호 디자인');self.setMinimumWidth(370)
+        layout=QVBoxLayout(self);form=QFormLayout();layout.addLayout(form)
+        self.font_box=SafeFontCombo();self.font_box.setCurrentFont(QFont(options['font']))
+        self.size=QDoubleSpinBox();self.size.setRange(4,144);self.size.setDecimals(2)
+        self.size.setSuffix(' pt');self.size.setValue(options['size'])
+        self.bold=QCheckBox('굵게');self.bold.setChecked(options['bold'])
+        self.prefix=QLineEdit(options['prefix']);self.suffix=QLineEdit(options['suffix'])
+        for edit in (self.prefix,self.suffix):edit.setMaxLength(40)
+        self.prefix.setPlaceholderText('예: ( 또는 - ');self.suffix.setPlaceholderText('예: ) 또는 -')
+        self.start=QSpinBox();self.start.setRange(0,999999);self.start.setValue(options['start'])
+        self.digits=QComboBox();self.digits.addItems(['1','01','001','0001','00001','000001'])
+        self.digits.setCurrentIndex(options['digits']-1)
+        self.color=QColor(options['color']);self.color_button=QPushButton('글자 색상')
+        self.color_button.clicked.connect(self.pick_color)
+        for label,widget in [('글자체',self.font_box),('크기',self.size),('',self.bold),
+                ('숫자 · 시작 번호',self.start),('숫자 · 자릿수',self.digits),
+                ('왼쪽 디자인',self.prefix),('오른쪽 디자인',self.suffix),('',self.color_button)]:
+            form.addRow(label,widget)
+        self.sample=QLabel();self.sample.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.sample.setMinimumHeight(80);self.sample.setWordWrap(True);layout.addWidget(self.sample)
+        buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Ok|QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText('적용')
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText('취소')
+        buttons.accepted.connect(self.accept);buttons.rejected.connect(self.reject);layout.addWidget(buttons)
+        for signal in (self.font_box.currentFontChanged,self.size.valueChanged,self.bold.toggled,
+                self.start.valueChanged,self.digits.currentIndexChanged,self.prefix.textChanged,self.suffix.textChanged):
+            signal.connect(self.update_sample)
+        self.update_sample()
+
+    def values(self):
+        return page_number_options({**self.options,'font':self.font_box.currentFont().family(),
+            'size':self.size.value(),'bold':self.bold.isChecked(),'start':self.start.value(),
+            'digits':self.digits.currentIndex()+1,'prefix':self.prefix.text(),'suffix':self.suffix.text(),
+            'color':self.color.name()})
+
+    def update_sample(self,*_args):
+        values=self.values();font=QFont(values['font']);font.setPointSizeF(values['size']);font.setBold(values['bold'])
+        self.sample.setFont(font);self.sample.setText(values['prefix']+str(values['start']).zfill(values['digits'])+values['suffix'])
+        self.sample.setStyleSheet('background:white;color:'+values['color']+';border:1px solid #8793a5;padding:8px;')
+
+    def pick_color(self):
+        color=QColorDialog.getColor(self.color,self,'쪽번호 색상')
+        if color.isValid():self.color=color;self.update_sample()
+
+
+class PageNumberSession(QObject):
+    def __init__(self,owner,editor,targets,options):
+        super().__init__(editor);self.owner=owner;self.editor=editor;self.targets=list(targets)
+        self.options=page_number_options(options);self.active=True;self.busy=False;self.dragging=False
+        self.record=None;self.documents=[];self.measure_key=();self.preview_error=''
+        self.top=QWidget(editor);self.right=QWidget(editor)
+        style=('QWidget{background:#253044;color:#e5edf7;font-size:11px;} '
+            'QDoubleSpinBox{background:#182130;color:#e5edf7;border:1px solid #65758e;padding:1px 2px;} '
+            'QPushButton,QToolButton{background:#36435a;color:#fff;border:1px solid #65758e;border-radius:3px;padding:3px;} '
+            'QPushButton:hover,QToolButton:hover{background:#704357;} '
+            'QSlider::groove:horizontal{height:3px;background:#48566d;border-radius:1px;margin:0 4px;} '
+            'QSlider::handle:horizontal{width:10px;margin:-4px 0;background:#a9bdd2;border:1px solid #d3dfeb;border-radius:3px;} '
+            'QSlider::sub-page:horizontal{background:#52a7d7;} '
+            'QSlider::groove:vertical{width:3px;background:#48566d;border-radius:1px;margin:4px 0;} '
+            'QSlider::handle:vertical{height:10px;margin:0 -4px;background:#a9bdd2;border:1px solid #d3dfeb;border-radius:3px;} '
+            'QSlider::sub-page:vertical{background:#52a7d7;}')
+        self.top.setStyleSheet(style);self.right.setStyleSheet(style)
+        self.right.setFixedWidth(80)
+        top_layout=QVBoxLayout(self.top);top_layout.setContentsMargins(4,3,4,3);top_layout.setSpacing(2)
+        row=QHBoxLayout();top_layout.addLayout(row);row.setSpacing(3)
+        row.addWidget(QLabel('가로 X',self.top));self.x=QDoubleSpinBox(self.top);row.addWidget(self.x)
+        self.center_button=QToolButton(self.top);self.center_button.setText('50%');self.center_button.setFixedSize(38,22)
+        self.center_button.setToolTip('가로 위치를 50% 가운데로 맞춤 · 세로 위치는 유지')
+        self.center_button.clicked.connect(lambda:self.set_coordinate('x',50.))
+        row.addWidget(self.center_button)
+        self.x_slider=QSlider(Qt.Orientation.Horizontal,self.top)
+        self.x_slider.setRange(0,10000);self.x_slider.setSingleStep(10);self.x_slider.setPageStep(100)
+        self.x_slider.setFixedHeight(20);self.x_slider.setMinimumWidth(0)
+        self.x_slider.setSizePolicy(QSizePolicy.Policy.Ignored,QSizePolicy.Policy.Fixed)
+        row.addWidget(QLabel('0'));row.addWidget(self.x_slider,1);row.addWidget(QLabel('100'))
+        row=QHBoxLayout();top_layout.addLayout(row);row.setSpacing(4)
+        self.caption=QLabel(f'선택한 {len(targets)}쪽 · 선택 순서대로',self.top)
+        self.caption.setWordWrap(True);self.caption.setMinimumWidth(0);row.addWidget(self.caption,1)
+        self.design=QPushButton('쪽번호 디자인',self.top);self.design.clicked.connect(self.design_clicked)
+        self.apply_button=QPushButton('삽입',self.top);self.apply_button.clicked.connect(self.apply)
+        self.cancel_button=QToolButton(self.top);self.cancel_button.setText('취소');self.cancel_button.clicked.connect(self.cancel)
+        for widget in (self.design,self.apply_button,self.cancel_button):row.addWidget(widget)
+        right_layout=QVBoxLayout(self.right);right_layout.setContentsMargins(4,4,4,4);right_layout.setSpacing(3)
+        right_layout.addWidget(QLabel('세로 Y',self.right),0,Qt.AlignmentFlag.AlignHCenter)
+        self.y=QDoubleSpinBox(self.right);right_layout.addWidget(self.y)
+        right_layout.addWidget(QLabel('0 · 위',self.right),0,Qt.AlignmentFlag.AlignHCenter)
+        self.y_slider=QSlider(Qt.Orientation.Vertical,self.right);self.y_slider.setInvertedAppearance(True)
+        self.y_slider.setRange(0,10000);self.y_slider.setSingleStep(10);self.y_slider.setPageStep(100)
+        self.y_slider.setFixedWidth(20);self.y_slider.setMinimumHeight(0)
+        self.y_slider.setSizePolicy(QSizePolicy.Policy.Fixed,QSizePolicy.Policy.Ignored)
+        right_layout.addWidget(self.y_slider,1,Qt.AlignmentFlag.AlignHCenter)
+        right_layout.addWidget(QLabel('100 · 아래',self.right),0,Qt.AlignmentFlag.AlignHCenter)
+        for name,spin,slider in [('x',self.x,self.x_slider),('y',self.y,self.y_slider)]:
+            spin.setRange(0,100);spin.setDecimals(2);spin.setSingleStep(.1);spin.setSuffix(' %');spin.setFixedSize(72,22)
+            spin.setToolTip('번호 중심 위치 · 50은 가운데 · 가장자리에서는 글자가 페이지 안에 놓입니다.')
+            spin.setValue(self.options[name]);slider.setValue(round(self.options[name]*100))
+            spin.valueChanged.connect(lambda value,n=name:self.set_coordinate(n,value))
+            slider.valueChanged.connect(lambda value,n=name:self.set_coordinate(n,value/100))
+        editor.main_layout.insertWidget(editor.main_layout.indexOf(editor.view_container),self.top)
+        editor.view_row.addWidget(self.right)
+        editor.nav_previous.setEnabled(False);editor.nav_next.setEnabled(False)
+        editor.view.viewport().setCursor(Qt.CursorShape.SizeAllCursor)
+        QApplication.instance().installEventFilter(self)
+        self.top.show();self.right.show();self.refresh();owner.update_preview_zoom(editor)
+
+    def set_coordinate(self,name,value):
+        if not self.active or self.busy:return
+        self.options[name]=round(max(0.,min(100.,float(value))),2)
+        spin,slider=(self.x,self.x_slider) if name=='x' else (self.y,self.y_slider)
+        for widget,number in ((spin,self.options[name]),(slider,round(self.options[name]*100))):
+            previous=widget.blockSignals(True);widget.setValue(number);widget.blockSignals(previous)
+        self.refresh()
+
+    def refresh(self):
+        from PySide6.QtGui import QTextDocument
+        if not self.active:return
+        info=self.editor.info
+        key=(json.dumps(self.options,sort_keys=True),info['width'],info['height']) if info else None
+        if key==self.measure_key:return
+        self.measure_key=key;self.record=None;self.documents=[];self.preview_error=''
+        if info:
+            try:
+                record=page_number_record(self.options,0,info['width'],info['height'])
+                self.paint_device=QImage(1,1,QImage.Format.Format_RGB32)
+                self.paint_device.setDotsPerMeterX(round(720/.0254));self.paint_device.setDotsPerMeterY(round(720/.0254))
+                for part in page_number_layout(record)['parts']:
+                    content,css=editor_text_content({**record,'text':part['text']})
+                    document=QTextDocument();document.documentLayout().setPaintDevice(self.paint_device)
+                    document.setDocumentMargin(0);document.setDefaultStyleSheet(css);document.setHtml(content)
+                    document.setTextWidth((part['width']+1)*10)
+                    self.documents.append((part,document))
+                self.record=record
+            except ValueError as error:self.preview_error=str(error)
+        self.apply_button.setEnabled(self.record is not None and not self.busy)
+        self.caption.setText(self.preview_error or f'선택한 {len(self.targets)}쪽 · 선택 순서대로')
+        self.editor.view.viewport().update()
+        self.owner.canvas.viewport().update()
+
+    def paint(self,painter):
+        self.refresh()
+        if not self.record:return
+        view=self.editor.view;box=view.scene_box(self.record['rect']);frame=view.page_rect;center=box.center()
+        painter.save();pen=QPen(QColor('#d54468'),1,Qt.PenStyle.DashLine);pen.setCosmetic(True)
+        painter.setPen(pen);painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawLine(QPointF(frame.left(),center.y()),QPointF(frame.right(),center.y()))
+        painter.drawLine(QPointF(center.x(),frame.top()),QPointF(center.x(),frame.bottom()))
+        painter.drawRect(box);painter.translate(box.topLeft())
+        scale=frame.width()/self.editor.info['width']/10;painter.scale(scale,scale)
+        for part,document in self.documents:
+            painter.save();painter.translate(part['x']*10,part['y']*10)
+            document.drawContents(painter,QRectF(0,0,(part['width']+1)*10,(part['height']+.5)*10));painter.restore()
+        painter.restore()
+
+    def place(self,position):
+        view=self.editor.view
+        if view.item is None or not self.editor.info:return False
+        point=view.mapToScene(position)
+        x=max(0.,min(100.,(point.x()-view.page_rect.left())/view.page_rect.width()*100))
+        y=max(0.,min(100.,(point.y()-view.page_rect.top())/view.page_rect.height()*100))
+        self.set_coordinate('x',x);self.set_coordinate('y',y);return True
+
+    def eventFilter(self,obj,event):
+        if not self.active:return False
+        if (event.type()==QEvent.Type.KeyPress and event.key()==Qt.Key.Key_Escape and
+                isinstance(obj,QWidget) and (obj is self.owner or self.owner.isAncestorOf(obj)) and
+                QApplication.activeModalWidget() is None):
+            if not self.busy:self.cancel()
+            event.accept();return True
+        if obj is not self.editor.view.viewport():return False
+        if event.type() in (QEvent.Type.ContextMenu,QEvent.Type.MouseButtonDblClick):event.accept();return True
+        if event.type()==QEvent.Type.MouseButtonPress and event.button()==Qt.MouseButton.LeftButton:
+            if not self.busy:
+                self.editor.view.setFocus();self.dragging=self.place(event.position().toPoint())
+            event.accept();return True
+        if event.type()==QEvent.Type.MouseMove and self.dragging:
+            if not self.busy:self.place(event.position().toPoint())
+            event.accept();return True
+        if event.type()==QEvent.Type.MouseButtonRelease and self.dragging:
+            if not self.busy:self.place(event.position().toPoint())
+            self.dragging=False;event.accept();return True
+        return False
+
+    def design_clicked(self):
+        if self.busy:return
+        dialog=PageNumberDesignDialog(self.editor,self.options)
+        if dialog.exec()==QDialog.DialogCode.Accepted:
+            self.options=dialog.values();self.refresh()
+        dialog.deleteLater()
+
+    def apply(self):
+        if not self.active or self.busy or self.record is None:return
+        self.owner.start_page_batch('page_numbers',self.targets,options=dict(self.options))
+
+    def set_busy(self,busy):
+        self.busy=bool(busy);self.dragging=False
+        self.top.setEnabled(not busy);self.right.setEnabled(not busy)
+        self.caption.setText('쪽번호를 삽입하는 중…' if busy else self.preview_error or f'선택한 {len(self.targets)}쪽 · 선택 순서대로')
+
+    def cancel(self):
+        if not self.busy:self.close()
+
+    def close(self):
+        if not self.active:return
+        self.active=False;self.dragging=False;QApplication.instance().removeEventFilter(self)
+        if self.owner.page_number_session is self:self.owner.page_number_session=None
+        self.owner.settings.setValue('page_numbers/options',json.dumps(self.options,ensure_ascii=False))
+        self.editor.main_layout.removeWidget(self.top);self.editor.view_row.removeWidget(self.right)
+        self.top.hide();self.right.hide();self.top.deleteLater();self.right.deleteLater()
+        self.editor.nav_previous.setEnabled(True);self.editor.nav_next.setEnabled(True)
+        self.editor.set_mode('pan');self.editor.view.viewport().update()
+        self.owner.update_preview_zoom(self.editor);self.owner.update_action_states()
+        self.owner.canvas.viewport().update();self.deleteLater()
+
+
 class TextEditDialog(QDialog):
     def __init__(self, parent, sample=None, title='글자 넣기'):
         super().__init__(parent)
@@ -8545,6 +9186,7 @@ class ThumbnailRail(QWidget):
         self.sync()
 
     def sync(self):
+        self.setVisible(not self.owner.book_focus)
         collapsed=(not self.owner.thumbnail_host.picker_open) if self.owner.dual_mode else self.owner.thumbnails_collapsed
         tip='썸네일 펼치기' if collapsed else '썸네일 접기'
         if self.owner.dual_mode:tip='오른쪽 비교 파일·쪽 선택' if collapsed else '오른쪽 비교 화면으로 돌아가기'
@@ -8624,6 +9266,8 @@ class DualCompareController(QObject):
         self.view_timer=QTimer(self);self.view_timer.setSingleShot(True);self.view_timer.setInterval(0)
         self.view_timer.timeout.connect(self.flush_view);self.view_source=None
         self.registration_applied=False
+        self.notice_timer=QTimer(self);self.notice_timer.setSingleShot(True);self.notice_timer.setInterval(10000)
+        self.notice_timer.timeout.connect(self.dismiss_notice)
 
     def pair(self):
         a,b=self.owner.preview_dialog,self.owner.dual_preview
@@ -8921,23 +9565,36 @@ class DualCompareController(QObject):
         self.update_bars();self.queue_view(pair[0])
 
     def set_status(self, text):
+        previous=self.status;pair=self.pair()
+        if not pair:text=''
         self.status=text
         notice=getattr(self.owner,'comparison_notice',None)
         if notice is not None:
-            notice.setText(text);notice.setVisible(bool(text and self.pair()))
-            notice.setStyleSheet('background:#252b38;color:'+('#ffc15c' if '보류' in text else '#d6dfea')+';padding:5px 10px;')
-        pair=self.pair()
+            notice.setText(text);notice.setProperty('warning','보류' in text)
+            if not text:self.dismiss_notice()
+            elif text!=previous:
+                notice.show();self.notice_timer.start()
+            footer=getattr(self.owner,'reading_footer',None)
+            if footer is not None:footer.sync()
         if pair:
             for editor in pair:
                 editor.compare_status.setText(text)
                 editor.compare_status.setStyleSheet('background:#252b38;color:'+
                     ('#ffc15c' if text.startswith('분석 보류') else '#d6dfea')+';padding:2px 8px;')
 
+    def dismiss_notice(self):
+        self.notice_timer.stop()
+        notice=getattr(self.owner,'comparison_notice',None)
+        if notice is not None:notice.hide()
+        footer=getattr(self.owner,'reading_footer',None)
+        if footer is not None:footer.sync()
+
     def update_bars(self):
         pair=self.pair()
+        if not pair:self.set_status('')
         for editor in (self.owner.preview_dialog,self.owner.dual_preview):
             if editor is None or editor.closed:continue
-            editor.dual_bar.setVisible(bool(pair) or self.owner.book_mode);editor.compare_status.hide()
+            editor.dual_bar.setVisible(bool(pair or self.owner.book_mode) and not editor.embedded);editor.compare_status.hide()
             pages=self.navigation_pages(editor);index=editor.navigation_index()
             caption=('오른쪽' if editor.dual_secondary else '왼쪽')+' · '+Path(editor.page.input_path or editor.page.label_path).name
             editor.dual_caption.setText(caption)
@@ -8956,6 +9613,8 @@ class DualCompareController(QObject):
                 editor.diff_previous.setEnabled(count>0);editor.diff_next.setEnabled(count>0)
         divider=getattr(self.owner,'compare_divider',None)
         if divider is not None:divider.wheel.set_active(self.linked() and not self.owner.dual_anim_closing)
+        footer=getattr(self.owner,'reading_footer',None)
+        if footer is not None:footer.sync()
 
     def focus_candidate(self, step):
         pair=self.pair();result=self.result
@@ -9099,9 +9758,200 @@ class CompareDivider(QSplitterHandle):
     def paintEvent(self,event):
         p=QPainter(self);p.fillRect(self.rect(),QColor('#252c3b'))
         p.setPen(QColor('#536079'));p.drawLine(0,0,0,self.height());p.drawLine(self.width()-1,0,self.width()-1,self.height())
-        if self.panel.isHidden():
-            p.setPen(QColor('#536079' if self.editor and self.editor.owner.book_mode else '#ec728b'));p.drawLine(self.width()//2,self.height()//2-18,self.width()//2,self.height()//2+18)
+        if self.panel.isHidden() and not (self.editor and self.editor.owner.book_mode):
+            p.setPen(QColor('#ec728b'));p.drawLine(self.width()//2,self.height()//2-18,self.width()//2,self.height()//2+18)
         p.end()
+
+
+class HoverHelpBlocker(QObject):
+    """Remove mouse-hover help without changing action/status messages."""
+    def eventFilter(self,watched,event):
+        if event.type()==QEvent.Type.ToolTip:
+            event.accept();return True
+        return False
+
+
+class BookFocusRestoreButton(QToolButton):
+    """Keep a transparent hover target over the page without reserving a row."""
+    def __init__(self,owner):
+        super().__init__(owner.content);self.owner=owner;self.hovered=False
+        self.setObjectName('book_focus_restore');self.setArrowType(Qt.ArrowType.DownArrow)
+        self.setFixedSize(30,24);self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAccessibleName('집중모드 종료 · 버튼 복원')
+        self.setAccessibleDescription('오른쪽 그림의 오른쪽 위에 마우스를 올리면 표시됩니다. Esc로도 종료할 수 있습니다.')
+        self.clicked.connect(lambda:owner.set_book_focus(False));self.hide()
+
+    def sync_hover(self):
+        hovered=bool(self.isVisible() and QApplication.activeModalWidget() is None and
+                     QApplication.activePopupWidget() is None and self.rect().contains(self.mapFromGlobal(QCursor.pos())))
+        if hovered!=self.hovered:self.hovered=hovered;self.update()
+
+    def enterEvent(self,event):
+        self.sync_hover();super().enterEvent(event)
+
+    def leaveEvent(self,event):
+        self.hovered=False;self.update();super().leaveEvent(event)
+
+    def hideEvent(self,event):
+        self.hovered=False;super().hideEvent(event)
+
+    def paintEvent(self,event):
+        if self.hovered or self.isDown():super().paintEvent(event)
+
+
+class BookGapHandle(QWidget):
+    """The wedge widens to the right, matching the direction of a wider gap."""
+    def __init__(self,owner,parent):
+        super().__init__(parent);self.owner=owner;self.pressed=False;self.hovered=False
+        self.start_x=0.;self.start_gap=0;self.saved_gap=0
+        self.setObjectName('book_gap_handle');self.setFixedSize(82,22)
+        self.setCursor(Qt.CursorShape.SizeHorCursor);self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName('두 그림 사이 간격 조절')
+        self.setAccessibleDescription('왼쪽으로 끌면 좁아지고 오른쪽으로 끌면 넓어집니다.')
+        self.hide()
+
+    def place(self):
+        owner=self.owner
+        visible=(owner.dual_mode and owner.book_mode and not owner.dual_anim_closing and
+                 owner.dual_progress>=.68 and not owner.thumbnail_host.picker_open and not owner.book_focus)
+        self.setVisible(visible)
+        if not visible:return
+        center=owner.compare_divider.mapTo(owner.content,QPoint(owner.compare_divider.width()//2,0)).x()
+        parent=self.parentWidget()
+        self.move(max(0,min(center-parent.x()-self.width()//2,parent.width()-self.width())),2)
+        self.raise_();self.update()
+
+    def paintEvent(self,event):
+        p=QPainter(self);p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        dark=self.owner.dark;active=self.pressed or self.hovered or self.hasFocus()
+        if active:
+            p.setPen(Qt.PenStyle.NoPen);p.setBrush(QColor('#384459' if dark else '#ced8e8'))
+            p.drawRoundedRect(QRectF(0,0,self.width(),self.height()),5,5)
+        outline=QColor('#ff8ca3' if self.pressed else '#d0ddf2' if dark and active else
+                       '#91a3bf' if dark else '#526783')
+        p.setPen(QPen(outline,1.2));p.setBrush(QColor('#ac5368' if self.pressed else '#5a6c87' if dark else '#9aadc9'))
+        wedge=QPainterPath(QPointF(12,11));wedge.lineTo(65,4);wedge.lineTo(65,18);wedge.closeSubpath()
+        p.drawPath(wedge)
+        p.setPen(QPen(outline,1.2))
+        for x in (70,74):p.drawLine(QPointF(x,7),QPointF(x,15))
+        p.end()
+
+    def enterEvent(self,event):self.hovered=True;self.update();super().enterEvent(event)
+    def leaveEvent(self,event):self.hovered=False;self.update();super().leaveEvent(event)
+
+    def mousePressEvent(self,event):
+        if event.button()!=Qt.MouseButton.LeftButton:return
+        self.pressed=True;self.start_x=event.globalPosition().x()
+        self.start_gap=self.owner.book_gap_width();self.saved_gap=self.owner.book_gap
+        self.setFocus(Qt.FocusReason.MouseFocusReason);self.update();event.accept()
+
+    def mouseMoveEvent(self,event):
+        if not self.pressed:return
+        delta=round(event.globalPosition().x()-self.start_x)
+        self.owner.set_book_gap(self.start_gap+delta)
+        self.update();event.accept()
+
+    def finish_drag(self):
+        if not self.pressed:return
+        self.pressed=False;self.owner.settings.setValue('book/image_gap',self.owner.book_gap);self.update()
+
+    def mouseReleaseEvent(self,event):
+        if event.button()==Qt.MouseButton.LeftButton and self.pressed:
+            self.finish_drag();event.accept()
+
+    def keyPressEvent(self,event):
+        if event.key()==Qt.Key.Key_Escape and self.pressed:
+            self.owner.set_book_gap(self.saved_gap);self.finish_drag();event.accept();return
+        if event.key() in (Qt.Key.Key_Left,Qt.Key.Key_Right):
+            step=10 if event.modifiers()&Qt.KeyboardModifier.ShiftModifier else 2
+            delta=step if event.key()==Qt.Key.Key_Right else -step
+            self.owner.set_book_gap(self.owner.book_gap_width()+delta,persist=True);event.accept();return
+        super().keyPressEvent(event)
+
+    def hideEvent(self,event):self.finish_drag();super().hideEvent(event)
+
+
+class ReadingFooterLabel(QLabel):
+    """Elide long names while keeping the page count visible at the book edge."""
+    def __init__(self,parent):
+        super().__init__(parent);self.full_text='';self.file_name='';self.page_count=''
+        self.setMinimumWidth(0);self.setSizePolicy(QSizePolicy.Policy.Ignored,QSizePolicy.Policy.Fixed)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setTextFormat(Qt.TextFormat.PlainText)
+
+    def setText(self,text):
+        self.full_text=str(text);self.file_name=self.page_count='';self.render_text()
+
+    def set_page(self,name,count):
+        self.file_name=name;self.page_count=count;self.full_text=name+' · '+count
+        self.render_text()
+
+    def render_text(self):
+        metrics=self.fontMetrics();width=max(0,self.contentsRect().width())
+        if self.page_count:
+            separator=' · ';spare=width-metrics.horizontalAdvance(self.page_count+separator)
+            name=metrics.elidedText(self.file_name,Qt.TextElideMode.ElideMiddle,max(0,spare))
+            text=(name+separator if name else '')+self.page_count
+            if metrics.horizontalAdvance(text)>width:text=metrics.elidedText(self.page_count,Qt.TextElideMode.ElideRight,width)
+        else:text=metrics.elidedText(self.full_text,Qt.TextElideMode.ElideRight,width)
+        if text!=super().text():super().setText(text)
+        self.setAccessibleName(self.full_text)
+
+    def resizeEvent(self,event):
+        super().resizeEvent(event);self.render_text()
+
+
+class ReadingFooter(QWidget):
+    """One row for both page identities, the book gap and a temporary review notice."""
+    def __init__(self,owner,parent):
+        super().__init__(parent);self.owner=owner;self.palette_key=None
+        self.setObjectName('reading_footer');self.setFixedHeight(26)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        self.left=ReadingFooterLabel(self);self.right=ReadingFooterLabel(self);self.notice=ReadingFooterLabel(self)
+        self.left.setAlignment(Qt.AlignmentFlag.AlignLeft|Qt.AlignmentFlag.AlignVCenter)
+        self.right.setAlignment(Qt.AlignmentFlag.AlignRight|Qt.AlignmentFlag.AlignVCenter)
+        self.notice.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.notice.hide();self.hide()
+
+    def sync(self):
+        owner=self.owner;primary=owner.preview_dialog;secondary=owner.dual_preview
+        visible=bool(owner.dual_mode and primary is not None and not primary.closed and primary.embedded and not owner.closing and not owner.book_focus)
+        self.setVisible(visible)
+        if not visible:return
+        dark=owner.dark;warning=bool(self.notice.property('warning'))
+        key=(dark,warning)
+        if key!=self.palette_key:
+            self.palette_key=key
+            self.setStyleSheet('QWidget#reading_footer{background:'+('#202734' if dark else '#e4e8ee')+';}'
+                'QLabel{background:transparent;color:'+('#aebed3' if dark else '#566272')+';font-size:11px;border:0;padding:0;}')
+            self.notice.setStyleSheet('color:'+('#ffc15c' if dark else '#925f0d')+';' if warning else '')
+        for label,editor in ((self.left,primary),(self.right,secondary)):
+            active=editor is not None and not editor.closed and (not editor.dual_secondary or not owner.thumbnail_host.picker_open)
+            label.setVisible(active)
+            if not active:continue
+            pages=editor.navigation_pages();index=editor.navigation_index()
+            count='빈 쪽' if editor.book_blank else f'{index+1:,} / {len(pages):,}쪽'
+            label.set_page(Path(editor.page.input_path or editor.page.label_path).name,count)
+        if owner.book_mode or not owner.comparison.pair():self.notice.hide()
+        handle=getattr(owner,'book_gap_handle',None)
+        if handle is not None:handle.place()
+        seam=owner.compare_divider.mapTo(owner.content,QPoint(owner.compare_divider.width()//2,0)).x()-self.x()
+        left_start=owner.preview_host.mapTo(owner.content,QPoint(0,0)).x()-self.x()+8
+        right_end=min(self.width(),owner.thumbnail_host.mapTo(owner.content,QPoint(owner.thumbnail_host.width(),0)).x()-self.x())-8
+        reserve=49 if handle is not None and not handle.isHidden() else owner.compare_divider.width()//2+8
+        left_end=max(left_start,seam-reserve);right_start=min(right_end,seam+reserve)
+        if not self.notice.isHidden():
+            edge_width=max(90,round((right_end-left_start)*.23))
+            left_end=min(left_end,left_start+edge_width);right_start=max(right_start,right_end-edge_width)
+            self.notice.setGeometry(left_end+8,2,max(0,right_start-left_end-16),22)
+        self.left.setGeometry(left_start,2,max(0,left_end-left_start),22)
+        self.right.setGeometry(right_start,2,max(0,right_end-right_start),22)
+        self.left.render_text();self.right.render_text();self.notice.render_text()
+
+    def resizeEvent(self,event):
+        super().resizeEvent(event)
+        if hasattr(self.owner,'book_gap_handle'):self.sync()
 
 
 class CompareSplitter(QSplitter):
@@ -9147,7 +9997,7 @@ class ThumbnailCompareHost(QWidget):
         super().__init__(parent);self.owner=owner;self.canvas=canvas;self.progress=0.;self.picker_open=False
         self.setMinimumWidth(200);self.setAcceptDrops(True)
         layout=QVBoxLayout(self);layout.setContentsMargins(0,0,0,0);layout.setSpacing(0)
-        header=QWidget(self);header.setFixedHeight(38)
+        header=QWidget(self);self.header=header;header.setFixedHeight(38)
         header.setStyleSheet('background:#202734;color:#d5dfef;')
         row=QHBoxLayout(header);row.setContentsMargins(6,4,6,4);row.setSpacing(5)
         self.dual_button=DualPullHandle(owner,header);row.addWidget(self.dual_button)
@@ -9169,9 +10019,37 @@ class ThumbnailCompareHost(QWidget):
             button=QToolButton(self.step_controls);button.setText(str(step));button.setCheckable(True);button.setFixedSize(28,26)
             button.setToolTip(f'{step}쪽씩 넘기기');button.setAccessibleName(button.toolTip())
             button.clicked.connect(lambda checked=False,value=step:owner.set_book_step(value));steps.addWidget(button);self.step_buttons.append(button)
-        group.addWidget(self.step_controls);row.addWidget(self.mode_group);row.addWidget(self.picker);row.addStretch()
+        group.addWidget(self.step_controls);row.addWidget(self.mode_group);row.addWidget(self.picker)
+        self.number_toggle=QToolButton(header);self.number_toggle.setText('쪽');self.number_toggle.setFixedSize(30,24)
+        self.number_toggle.setCheckable(True);self.number_toggle.setEnabled(False)
+        self.number_toggle.setToolTip('쪽번호 도구 열기 / 접기')
+        self.number_toggle.setAccessibleName('쪽번호 도구 열기 / 접기')
+        self.number_toggle.setStyleSheet('QToolButton{background:#293344;color:#d5dfef;border:1px solid #53627a;border-radius:3px;padding:0;} '
+            'QToolButton:hover{background:#473345;} QToolButton:checked{background:#673246;border-color:#ff8097;} '
+            'QToolButton:disabled{color:#748197;}')
+        self.number_toggle.toggled.connect(self.set_number_tools)
+        row.addWidget(self.number_toggle);row.addStretch()
+        self.focus_button=QToolButton(header);self.focus_button.setText('집중모드')
+        self.focus_button.setObjectName('book_focus_button');self.focus_button.setFixedSize(70,26)
+        self.focus_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.focus_button.setAccessibleName('두 장 읽기 집중모드')
+        self.focus_button.setStyleSheet('QToolButton{background:#293344;color:#d5dfeb;border:1px solid #53627a;border-radius:4px;padding:0;} QToolButton:hover{background:#3b4557;} QToolButton:disabled{color:#748197;}')
+        self.focus_button.clicked.connect(lambda:owner.set_book_focus(True));row.addWidget(self.focus_button)
         self.sync_modes()
         layout.addWidget(header)
+        self.number_bar=QWidget(self);number_row=QHBoxLayout(self.number_bar)
+        number_row.setContentsMargins(6,3,6,3);number_row.setSpacing(5)
+        self.number_bar.setStyleSheet('QWidget{background:#252d3c;color:#d5dfef;} QToolButton{background:#303d52;color:#e5edf6;border:1px solid #52637d;border-radius:3px;padding:4px;} QToolButton:hover{background:#704357;} QToolButton:disabled{color:#748197;}')
+        self.number_button=QToolButton(self.number_bar);self.number_button.setText('쪽번호 생성')
+        self.number_button.setEnabled(False)
+        self.number_button.setToolTip('선택한 페이지에 선택 순서대로 쪽번호 삽입 · Ctrl 클릭으로 순서 선택')
+        self.number_button.clicked.connect(owner.start_page_numbers)
+        self.number_delete_button=QToolButton(self.number_bar);self.number_delete_button.setText('쪽번호 삭제')
+        self.number_delete_button.setEnabled(False)
+        self.number_delete_button.setToolTip('현재 문서 전체에서 더뷰어가 삽입한 쪽번호만 삭제')
+        self.number_delete_button.clicked.connect(owner.delete_page_numbers)
+        number_row.addWidget(self.number_button);number_row.addWidget(self.number_delete_button);number_row.addStretch()
+        layout.addWidget(self.number_bar);self.number_bar.hide()
         self.body=QWidget(self);layout.addWidget(self.body,1)
         canvas.setParent(self.body);canvas.show()
         self.curtain=QWidget(self.body);self.curtain.setStyleSheet('background:#181b24;')
@@ -9187,6 +10065,9 @@ class ThumbnailCompareHost(QWidget):
         self.mode_button.setStyleSheet('QToolButton{background:'+('#723247' if book else '#30445e')+';color:#fff;border:0;border-radius:3px;} QToolButton:hover{background:#885066;}')
         self.step_controls.setVisible(book)
         for i,button in enumerate(self.step_buttons,1):button.setChecked(self.owner.book_step==i)
+        self.focus_button.setVisible(self.owner.dual_mode and self.owner.book_mode and not self.owner.book_focus)
+        self.focus_button.setEnabled(not self.owner.dual_anim_timer.isActive() and not self.owner.dual_anim_closing and
+                                     not self.picker_open and self.owner.page_number_session is None)
 
     def dragEnterEvent(self,event):
         if self.owner.accepts_open_drop(event):event.setDropAction(Qt.DropAction.CopyAction);event.accept()
@@ -9204,13 +10085,22 @@ class ThumbnailCompareHost(QWidget):
     def attach(self,editor):
         editor.setParent(self.curtain,Qt.WindowType.Widget);editor.setMinimumSize(200,0)
         self.curtain_layout.addWidget(editor);editor.show();self.picker_open=False
+        self.number_toggle.setChecked(False)
         self.picker.setVisible(not self.owner.book_mode);self.set_progress(0.)
 
     def set_progress(self,progress):
         self.progress=max(0.,min(1.,progress));self.layout_body()
         self.curtain.setVisible(self.progress>0 and not self.picker_open)
         self.canvas.setVisible(self.picker_open or self.progress<1.)
+        self.number_bar.setVisible(self.number_toggle.isChecked() and (self.picker_open or self.progress<1.))
         if self.curtain.isVisible():self.curtain.raise_()
+        self.sync_modes()
+
+    def set_number_tools(self,opened):
+        # 듀얼 보기에서도 [쪽]으로 썸네일을 펼쳐 페이지를 선택할 수 있다.
+        if opened and self.owner.dual_mode and not self.picker_open:
+            self.owner.toggle_thumbnail_panel()
+        self.set_progress(self.progress)
 
     def layout_body(self):
         self.canvas.setGeometry(self.body.rect())
@@ -9294,6 +10184,7 @@ class ZoomView(QGraphicsView):
         self.item = None
         self.pdf_size = None
         self.content_transform=QTransform();self.registration_frame=None
+        self.book_layout=False
         self.auto_fit = True
         self.fit_scale = 1.0
         self.editor = None
@@ -9317,6 +10208,33 @@ class ZoomView(QGraphicsView):
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
         self.setMouseTracking(True)
         self.setAcceptDrops(True);self.viewport().setAcceptDrops(True)
+
+    def setBackgroundBrush(self,brush):
+        super().setBackgroundBrush(brush)
+        # The gap occupies viewport margins; give these the same reading colour.
+        palette=self.palette();color=self.backgroundBrush().color()
+        palette.setColor(QPalette.ColorRole.Window,color);palette.setColor(QPalette.ColorRole.Base,color)
+        self.setPalette(palette);self.setAutoFillBackground(True)
+        # The right pane's curtain stylesheet otherwise overrides the margin colour.
+        style='QGraphicsView{background:'+color.name()+';}'
+        if self.styleSheet()!=style:self.setStyleSheet(style)
+
+    def sync_book_layout(self):
+        editor=self.editor;owner=editor.owner if editor is not None else None
+        book=bool(owner is not None and not editor.closed and owner.dual_mode and owner.book_mode)
+        right=bool(book and editor.dual_secondary)
+        alignment=Qt.AlignmentFlag.AlignCenter
+        if book:
+            alignment=(Qt.AlignmentFlag.AlignLeft if right else Qt.AlignmentFlag.AlignRight)|Qt.AlignmentFlag.AlignVCenter
+        gap=owner.book_gap_width() if book else 0
+        margins=(gap-gap//2,0,0,0) if right else (0,0,gap//2,0) if book else (0,0,0,0)
+        current=self.viewportMargins()
+        if (self.book_layout==book and self.alignment()==alignment and
+                (current.left(),current.top(),current.right(),current.bottom())==margins):return
+        self.book_layout=book;self.setAlignment(alignment);self.setViewportMargins(*margins)
+        self.apply_display_geometry()
+        if self.item is not None and self.auto_fit:self.fit_page()
+        self.controls_timer.start()
 
     def dragEnterEvent(self,event):
         owner=self.editor.owner if self.editor is not None else None
@@ -9367,15 +10285,21 @@ class ZoomView(QGraphicsView):
         if pix.isNull():
             return
         first = self.item is None
+        width, height = self.pdf_size or (pix.width(), pix.height())
+        page_rect = QRectF(0, 0, 600, 600*height/width)
+        # 같은 쪽의 회전/교체에도 새 비율을 적용한다. 해상도 변경에 따른
+        # 한 픽셀 이내 반올림 차이는 기존 비율을 유지하여 맞춤이 흔들리지 않는다.
+        geometry_changed = first or not math.isclose(page_rect.height(), self.page_rect.height(),
+                                                     rel_tol=0, abs_tol=600/pix.width())
         if first:
             self.item = self.scene().addPixmap(pix)
-            self.page_rect = QRectF(0, 0, 600, 600*pix.height()/pix.width())
-            self.scene().setSceneRect(self.page_rect.adjusted(-18, -18, 18, 18))
         else:
             self.item.setPixmap(pix)
+        if geometry_changed:
+            self.page_rect = page_rect
         self.item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
         self.apply_display_geometry()
-        if first:
+        if first or (geometry_changed and self.auto_fit):
             self.fit_page()
 
     def set_page_geometry(self, width, height):
@@ -9393,7 +10317,12 @@ class ZoomView(QGraphicsView):
         base=QTransform.fromScale(self.page_rect.width()/pix.width(),self.page_rect.height()/pix.height())
         self.item.setTransform(base*self.content_transform)
         frame=self.registration_frame if self.registration_frame is not None else self.page_rect
-        self.scene().setSceneRect(frame.adjusted(-18,-18,18,18))
+        # Keep spare space outside the spread, never between its two pages.
+        left,right=-18,18
+        if self.book_layout:
+            if self.editor.dual_secondary:left=0
+            else:right=0
+        self.scene().setSceneRect(frame.adjusted(left,-18,right,18))
 
     def set_registration(self,transform=None,frame=None):
         self.content_transform=QTransform(transform) if transform is not None else QTransform()
@@ -9578,7 +10507,7 @@ class ZoomView(QGraphicsView):
             event.accept();return
         if editor is not None and event.button()==Qt.MouseButton.RightButton:
             if editor.mode=='edit' and editor.ready() and self.gesture_start is None:
-                point=self.pdf_point(event.position().toPoint())
+                point=self.pdf_point(event.position().toPoint(),clamp=True)
                 if point is not None:
                     self.range_start=self.range_end=point;self.range_screen_start=event.position().toPoint()
                     self.range_additive=bool(event.modifiers()&Qt.KeyboardModifier.ControlModifier);self.setFocus();event.accept();return
@@ -9710,11 +10639,15 @@ class ZoomView(QGraphicsView):
         painter.save();pen=QPen(page_border_brush(editor.page,self.page_rect),2);pen.setCosmetic(True)
         painter.setPen(pen);painter.setBrush(Qt.BrushStyle.NoBrush);painter.drawRect(self.page_rect);painter.restore()
         if self.page_rect.width()>self.page_rect.height():
-            painter.save();pen=QPen(QColor('#6bafc8'),1,Qt.PenStyle.DashLine);pen.setCosmetic(True)
+            hint_dark=self.backgroundBrush().color().lightness()<128
+            painter.save();pen=QPen(QColor('#666666' if hint_dark else '#b0b0b0'),1,Qt.PenStyle.DashLine);pen.setCosmetic(True)
             painter.setPen(pen);painter.setBrush(Qt.BrushStyle.NoBrush);painter.drawRect(self.page_rect.adjusted(-6,-6,6,6))
-            painter.setPen(QColor('#6bafc8'));font=QFont();font.setPixelSize(max(5,round(10/self.transform().m11())));painter.setFont(font)
+            painter.setPen(QColor('#949494' if hint_dark else '#808080'));font=QFont();font.setPixelSize(max(5,round(10/self.transform().m11())));painter.setFont(font)
             painter.drawText(QPointF(0,-10),'↔ 가로');painter.restore()
         if editor.pending_cover is not None and self.pdf_size is not None:painter.fillRect(self.scene_box(editor.pending_cover),editor.pending_cover_color)
+        session=getattr(editor.owner,'page_number_session',None)
+        if session is not None and session.active and session.editor is editor:
+            session.paint(painter);return
         if not editor.info or editor.mode=='pan':self.draw_navigation(painter);return
         painter.save();pen=QPen(QColor(255,66,92,60),1);pen.setCosmetic(True);painter.setPen(pen);painter.setBrush(Qt.BrushStyle.NoBrush)
         if editor.mode=='edit':
@@ -9798,19 +10731,418 @@ class ZoomView(QGraphicsView):
         super().keyPressEvent(event)
 
 
+_PYTHON_STRING_TOKEN = re.compile(r'''\#|(?i:(?<!\w)(?:br|rb|fr|rf|r|u|b|f))?(?:\"\"\"|\x27\x27\x27|\"|\x27)''')
+
+
+def python_line_parts(text, previous_state=0):
+    """Mask comments/strings for coloring and indentation, including multiline strings."""
+    quotes={1:"'''",2:'"""',3:"'",4:'"'};parts=[];position=0;state=0
+    def closing(quote,start):
+        while True:
+            index=text.find(quote,start)
+            if index<0:return -1
+            before=index
+            while before>0 and text[before-1]=='\\':before-=1
+            if (index-before)%2==0:return index+len(quote)
+            start=index+1
+    def continued(quote):
+        if len(quote)==3:return 1 if quote=="'''" else 2
+        trailing=len(text)-len(text.rstrip('\\'))
+        return (3 if quote=="'" else 4) if trailing%2 else 0
+    if previous_state in quotes:
+        quote=quotes[previous_state];end=closing(quote,0)
+        if end<0:return ' '*len(text),[(0,len(text),'string')],continued(quote)
+        parts.append((0,end,'string'));position=end
+    while position<len(text):
+        match=_PYTHON_STRING_TOKEN.search(text,position)
+        if match is None:break
+        start=match.start();token=match.group()
+        if token=='#':
+            parts.append((start,len(text),'comment'));break
+        quote=next(q for q in ("'''",'"""',"'",'"') if token.endswith(q))
+        end=closing(quote,match.end())
+        if end<0:
+            parts.append((start,len(text),'string'));state=continued(quote);break
+        parts.append((start,end,'string'));position=end
+    masked=[];position=0
+    for start,end,_kind in parts:
+        masked.extend((text[position:start],' '*(end-start)));position=end
+    masked.append(text[position:])
+    return ''.join(masked),parts,state
+
+
+@dataclass(frozen=True)
+class PythonFunctionSpan:
+    name: str
+    start_line: int
+    def_line: int
+    end_line: int
+    indent: str
+    asynchronous: bool = False
+
+    @property
+    def label(self):
+        return ('async ' if self.asynchronous else '')+self.name+f' · {self.start_line:,}–{self.end_line:,}줄'
+
+
+def python_function_spans(source, filename='<editor>'):
+    """Source locations only. Includes decorators, methods and nested functions."""
+    tree=ast.parse(source,filename=filename);lines=source.split('\n');found=[];stack=[(tree,())]
+    while stack:
+        node,scope=stack.pop();child_scope=scope
+        if isinstance(node,(ast.FunctionDef,ast.AsyncFunctionDef,ast.ClassDef)):
+            child_scope=scope+(node.name,)
+        if isinstance(node,(ast.FunctionDef,ast.AsyncFunctionDef)):
+            start=min([node.lineno]+[d.lineno for d in node.decorator_list]);end=node.end_lineno
+            indent=re.match(r'[ \t]*',lines[node.lineno-1]).group()
+            # Keep indented trailing comments with their function, but leave separator blank lines.
+            scan=end
+            while scan<len(lines):
+                value=lines[scan]
+                if not value.strip():scan+=1;continue
+                margin=re.match(r'[ \t]*',value).group()
+                if value.lstrip().startswith('#') and len(margin.expandtabs(8))>len(indent.expandtabs(8)):
+                    end=scan+1;scan+=1;continue
+                break
+            found.append(PythonFunctionSpan('.'.join(child_scope),start,node.lineno,end,indent,isinstance(node,ast.AsyncFunctionDef)))
+        stack.extend((child,child_scope) for child in reversed(list(ast.iter_child_nodes(node))))
+    return sorted(found,key=lambda f:(f.start_line,-f.end_line,f.name))
+
+
+def python_function_offsets(source, span):
+    starts=[0]
+    for line in source.split('\n')[:-1]:starts.append(starts[-1]+len(line)+1)
+    return starts[span.start_line-1],starts[span.end_line] if span.end_line<len(starts) else len(source)
+
+
+def python_syntax_error(source, filename='<editor>'):
+    """Compile for syntax/context checks; never execute the returned code object."""
+    try:compile(source,filename,'exec',dont_inherit=True)
+    except (SyntaxError,ValueError,OverflowError,RecursionError,MemoryError) as exc:return exc
+    return None
+
+
+def prepare_python_function_replacement(value, span, trailing_newline=True):
+    """Align structural indentation while preserving literal multiline string contents."""
+    value=text_normalize(value).strip('\n')
+    lines=value.split('\n')
+    if len(lines)>=2 and lines[0].strip().lower() in ('```','```python','```py') and lines[-1].strip()=='```':
+        value='\n'.join(lines[1:-1]).strip('\n');lines=value.split('\n')
+    tokens=list(tokenize.generate_tokens(io.StringIO(value).readline))
+    header=next((t for t in tokens if t.type==tokenize.NAME and t.string=='def'),None)
+    if header is None:raise ValueError('교체할 함수 전체를 넣어주세요. def 또는 async def가 필요합니다.')
+    margin=re.match(r'[ \t]*',lines[header.start[0]-1]).group();literal_rows=set();fstrings=[]
+    for token in tokens:
+        if token.type==tokenize.STRING:literal_rows.update(range(token.start[0]+1,token.end[0]+1))
+        kind=tokenize.tok_name.get(token.type,'')
+        if kind=='FSTRING_START':fstrings.append(token.start[0])
+        elif kind=='FSTRING_END' and fstrings:literal_rows.update(range(fstrings.pop()+1,token.end[0]+1))
+    normalized=[]
+    for number,line in enumerate(lines,1):
+        if number in literal_rows:normalized.append(line)
+        elif not line.strip():normalized.append('')
+        else:normalized.append(line[len(margin):] if margin and line.startswith(margin) else line)
+    tree=ast.parse('\n'.join(normalized))
+    if len(tree.body)!=1 or not isinstance(tree.body[0],(ast.FunctionDef,ast.AsyncFunctionDef)):
+        raise ValueError('선택한 함수 하나만 교체할 수 있습니다. 다른 함수·클래스·실행 코드를 함께 넣지 마세요.')
+    if tree.body[0].name!=span.name.rsplit('.',1)[-1]:
+        raise ValueError('함수 이름을 유지해주세요: '+span.name.rsplit('.',1)[-1])
+    result='\n'.join(line if number in literal_rows or not line else span.indent+line
+                     for number,line in enumerate(normalized,1))
+    return result+('\n' if trailing_newline else '')
+
+
+def code_diff_rows(before, after):
+    """Align physical lines, with explicit gaps and original line-number mappings."""
+    old=before.split('\n');new=after.split('\n');left=[];right=[];left_numbers=[];right_numbers=[]
+    left_colors={};right_colors={};changes=[];removed=added=0
+    for tag,a,b,c,d in difflib.SequenceMatcher(None,old,new).get_opcodes():
+        if tag!='equal':changes.append(len(left));removed+=b-a;added+=d-c
+        for offset in range(max(b-a,d-c)):
+            row=len(left);li=a+offset if a+offset<b else None;ri=c+offset if c+offset<d else None
+            left.append(old[li] if li is not None else '');right.append(new[ri] if ri is not None else '')
+            left_numbers.append(li+1 if li is not None else None);right_numbers.append(ri+1 if ri is not None else None)
+            if tag!='equal':
+                left_colors[row]='removed' if li is not None else 'gap'
+                right_colors[row]='added' if ri is not None else 'gap'
+    return {'before':'\n'.join(left),'after':'\n'.join(right),'before_numbers':left_numbers,'after_numbers':right_numbers,
+            'before_colors':left_colors,'after_colors':right_colors,'changes':changes,'removed':removed,'added':added}
+
+
+class PythonSyntaxHighlighter(QSyntaxHighlighter):
+    def __init__(self,document,dark=True):
+        import builtins,keyword
+        super().__init__(document)
+        self.keywords=set(keyword.kwlist);self.builtins=set(dir(builtins))
+        colors=({'keyword':'#c792ea','builtin':'#82aaff','definition':'#ffcb6b',
+                 'number':'#f78c6c','string':'#c3e88d','comment':'#8292a2'} if dark else
+                {'keyword':'#7c279b','builtin':'#075db0','definition':'#795800',
+                 'number':'#aa3900','string':'#237a36','comment':'#687582'})
+        self.formats={}
+        for name,color in colors.items():
+            format=QTextCharFormat();format.setForeground(QColor(color))
+            if name in ('keyword','definition'):format.setFontWeight(QFont.Weight.Bold)
+            self.formats[name]=format
+        self.names=re.compile(r'\b[^\W\d]\w*\b')
+        self.definitions=re.compile(r'\b(?:def|class)\s+([^\W\d]\w*)')
+        self.numbers=re.compile(r'\b(?:0[xX][\da-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|(?:\d[\d_]*(?:\.[\d_]*)?|\.\d[\d_]*)(?:[eE][+-]?[\d_]+)?)[jJ]?\b')
+
+    def highlightBlock(self,text):
+        code,parts,state=python_line_parts(text,self.previousBlockState())
+        offsets=None
+        if any(ord(c)>0xffff for c in text):
+            offsets=[0]
+            for c in text:offsets.append(offsets[-1]+(2 if ord(c)>0xffff else 1))
+        def color(start,end,kind):
+            a,b=(offsets[start],offsets[end]) if offsets is not None else (start,end)
+            self.setFormat(a,b-a,self.formats[kind])
+        for start,end,kind in parts:color(start,end,kind)
+        for match in self.names.finditer(code):
+            name=match.group()
+            if name in self.keywords:color(match.start(),match.end(),'keyword')
+            elif name in self.builtins:color(match.start(),match.end(),'builtin')
+        for match in self.numbers.finditer(code):color(match.start(),match.end(),'number')
+        for match in self.definitions.finditer(code):color(match.start(1),match.end(1),'definition')
+        self.setCurrentBlockState(state)
+
+
+class CodeLineNumberArea(QWidget):
+    def __init__(self,editor):
+        super().__init__(editor);self.editor=editor;self.setToolTip('줄 번호')
+    def sizeHint(self):return QSize(self.editor.line_number_width(),0)
+    def paintEvent(self,event):self.editor.paint_line_numbers(event)
+
+
+class SourceTextEdit(QPlainTextEdit):
+    """Plain text in all modes; Python adds a gutter, coloring and indent keys."""
+    def __init__(self,parent=None,dark=True):
+        super().__init__(parent);self.dark=bool(dark);self.python_mode=False;self.highlighter=None
+        self.display_line_numbers=None;self.line_highlights={};self.error_line=None
+        self.line_numbers=CodeLineNumberArea(self);self.line_numbers.hide()
+        self.blockCountChanged.connect(self.update_line_number_width)
+        self.updateRequest.connect(self.update_line_number_area)
+        self.cursorPositionChanged.connect(self.highlight_current_line)
+
+    def set_python_mode(self,enabled):
+        if self.python_mode==bool(enabled):return
+        self.python_mode=bool(enabled)
+        if enabled:
+            families=set(QFontDatabase.families())
+            font=QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+            for name in ('Cascadia Code','Consolas','DejaVu Sans Mono','Courier New'):
+                if name in families:font.setFamily(name);break
+            font.setPointSize(12);font.setStyleHint(QFont.StyleHint.Monospace);font.setFixedPitch(True)
+            self.setFont(font);self.setTabStopDistance(self.fontMetrics().horizontalAdvance(' ')*4)
+            background,foreground=('#1c2330','#dce5f1') if self.dark else ('#fafbfd','#263341')
+            self.setStyleSheet('QPlainTextEdit{background:'+background+';color:'+foreground+
+                              ';border:1px solid #65758e;selection-background-color:#355d89;}')
+            self.highlighter=PythonSyntaxHighlighter(self.document(),self.dark)
+        else:
+            if self.highlighter is not None:
+                self.highlighter.setDocument(None);self.highlighter.deleteLater();self.highlighter=None
+            self.setStyleSheet('')
+        self.line_numbers.setVisible(enabled);self.update_line_number_width();self.highlight_current_line()
+
+    def line_number_width(self):
+        return 14+self.fontMetrics().horizontalAdvance('9')*len(str(max(1,self.blockCount()))) if self.python_mode else 0
+
+    def update_line_number_width(self,*_args):
+        self.setViewportMargins(self.line_number_width(),0,0,0)
+        rect=self.contentsRect();self.line_numbers.setGeometry(rect.left(),rect.top(),self.line_number_width(),rect.height())
+        self.line_numbers.update()
+
+    def update_line_number_area(self,rect,dy):
+        if not self.python_mode:return
+        if dy:self.line_numbers.scroll(0,dy)
+        else:self.line_numbers.update(0,rect.y(),self.line_numbers.width(),rect.height())
+        if rect.contains(self.viewport().rect()):self.update_line_number_width()
+
+    def resizeEvent(self,event):
+        super().resizeEvent(event);self.update_line_number_width()
+
+    def paint_line_numbers(self,event):
+        painter=QPainter(self.line_numbers)
+        painter.fillRect(event.rect(),QColor('#171e2b' if self.dark else '#edf1f6'))
+        painter.setFont(self.font());block=self.firstVisibleBlock();number=block.blockNumber()
+        top=round(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
+        bottom=top+round(self.blockBoundingRect(block).height());current=self.textCursor().blockNumber()
+        while block.isValid() and top<=event.rect().bottom():
+            if block.isVisible() and bottom>=event.rect().top():
+                painter.setPen(QColor('#ef8095' if number==self.error_line else
+                    (('#eef4ff' if self.dark else '#25344b') if number==current else '#8292a2')))
+                shown=self.display_line_numbers[number] if self.display_line_numbers is not None and number<len(self.display_line_numbers) else number+1
+                painter.drawText(0,top,self.line_numbers.width()-6,self.fontMetrics().height(),Qt.AlignmentFlag.AlignRight,str(shown) if shown is not None else '')
+            block=block.next();top=bottom;bottom=top+round(self.blockBoundingRect(block).height());number+=1
+        painter.end()
+
+    def highlight_current_line(self):
+        selections=[]
+        if self.python_mode and not self.isReadOnly():
+            selection=QTextEdit.ExtraSelection()
+            selection.format.setBackground(QColor('#263449' if self.dark else '#e7effb'))
+            selection.format.setProperty(QTextFormat.Property.FullWidthSelection,True)
+            selection.cursor=self.textCursor();selection.cursor.clearSelection();selections.append(selection)
+        highlights=dict(self.line_highlights)
+        if self.error_line is not None:highlights[self.error_line]='#5d2a39' if self.dark else '#ffdce3'
+        for number,color in highlights.items():
+            block=self.document().findBlockByNumber(number)
+            if not block.isValid():continue
+            selection=QTextEdit.ExtraSelection();selection.cursor=QTextCursor(block)
+            selection.format.setBackground(QColor(color));selection.format.setProperty(QTextFormat.Property.FullWidthSelection,True)
+            selections.append(selection)
+        self.setExtraSelections(selections);self.line_numbers.update()
+
+    @staticmethod
+    def text_prefix(cursor):
+        return cursor.block().text().encode('utf-16-le')[:cursor.positionInBlock()*2].decode('utf-16-le')
+
+    def indent_lines(self,outdent=False):
+        cursor=self.textCursor();anchor,position=cursor.anchor(),cursor.position()
+        selected=cursor.hasSelection();selection_start=cursor.selectionStart()
+        first=self.document().findBlock(selection_start);last=self.document().findBlock(cursor.selectionEnd())
+        if selected and cursor.selectionEnd()==last.position():last=last.previous()
+        edits=[];block=first
+        while block.isValid() and block.blockNumber()<=last.blockNumber():
+            text=block.text();removed=(1 if text.startswith('\t') else min(4,len(text)-len(text.lstrip(' ')))) if outdent else 0
+            if not outdent or removed:edits.append((block.position(),removed,0 if outdent else 4))
+            block=block.next()
+        edit=QTextCursor(self.document());edit.beginEditBlock()
+        for start,removed,added in reversed(edits):
+            edit.setPosition(start);edit.setPosition(start+removed,QTextCursor.MoveMode.KeepAnchor)
+            edit.insertText(' '*added)
+        edit.endEditBlock()
+        def moved(value,left=False):
+            delta=0
+            for start,removed,added in edits:
+                if value<start:return value+delta
+                if value<=start+removed:return start+delta+(0 if left else added)
+                delta+=added-removed
+            return value+delta
+        result=QTextCursor(self.document())
+        result.setPosition(moved(anchor,selected and anchor==selection_start))
+        result.setPosition(moved(position,selected and position==selection_start),QTextCursor.MoveMode.KeepAnchor)
+        self.setTextCursor(result)
+
+    def keyPressEvent(self,event):
+        if self.python_mode and not self.isReadOnly() and not event.modifiers() & (Qt.KeyboardModifier.ControlModifier|Qt.KeyboardModifier.AltModifier|Qt.KeyboardModifier.MetaModifier):
+            key=event.key();cursor=self.textCursor()
+            if key==Qt.Key.Key_Backtab or key==Qt.Key.Key_Tab and event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                self.indent_lines(True);event.accept();return
+            if key==Qt.Key.Key_Tab:
+                if cursor.hasSelection():self.indent_lines()
+                else:
+                    column=len(self.text_prefix(cursor).expandtabs(4));cursor.beginEditBlock()
+                    cursor.insertText(' '*(4-column%4));cursor.endEditBlock();self.setTextCursor(cursor)
+                event.accept();return
+            if key in (Qt.Key.Key_Return,Qt.Key.Key_Enter):
+                cursor.beginEditBlock();cursor.removeSelectedText();prefix=self.text_prefix(cursor)
+                indent=re.match(r'[ \t]*',prefix).group()
+                code,_,_=python_line_parts(prefix,cursor.block().previous().userState())
+                if code.rstrip().endswith((':','(','[','{')):indent+=' '*4
+                cursor.insertText('\n'+indent);cursor.endEditBlock();self.setTextCursor(cursor);event.accept();return
+            if key==Qt.Key.Key_Backspace and not cursor.hasSelection():
+                prefix=self.text_prefix(cursor)
+                if prefix and not prefix.strip(' '):
+                    count=len(prefix)%4 or 4;cursor.setPosition(cursor.position()-count,QTextCursor.MoveMode.KeepAnchor)
+                    cursor.removeSelectedText();self.setTextCursor(cursor);event.accept();return
+        super().keyPressEvent(event)
+
+
+class CodeDiffDialog(QDialog):
+    """Read-only aligned comparison against the last loaded/saved editor text."""
+    def __init__(self, parent, before, after, title='수정 전후 비교', dark=True, before_caption='수정 전 · 최근 불러오기/저장 기준'):
+        super().__init__(parent);self.setWindowTitle(title);self.setWindowIcon(application_icon());self.resize(1180,760)
+        layout=QVBoxLayout(self);self.diff=code_diff_rows(before,after);self.change_index=-1
+        label=QLabel('빨강: 수정 전 · 초록: 수정 후 · 빈 칸: 대응하는 코드 없음\n'+
+            (f'수정 전 {self.diff["removed"]:,}줄 / 수정 후 {self.diff["added"]:,}줄 · {len(self.diff["changes"]):,}개 변경 구간'
+             if self.diff['changes'] else '수정된 내용이 없습니다.'));label.setTextFormat(Qt.TextFormat.PlainText);layout.addWidget(label)
+        splitter=QSplitter(Qt.Orientation.Horizontal);splitter.setChildrenCollapsible(False);layout.addWidget(splitter,1)
+        colors=({'removed':'#4e2935','added':'#254734','gap':'#292e38'} if dark else
+                {'removed':'#ffdde3','added':'#d7f2df','gap':'#e9edf2'})
+        for key,caption in (('before',before_caption),('after','수정 후 · 현재 편집 내용')):
+            panel=QWidget();column=QVBoxLayout(panel);column.setContentsMargins(0,0,0,0);column.addWidget(QLabel(caption))
+            edit=SourceTextEdit(panel,dark=dark);edit.setReadOnly(True);edit.set_python_mode(True)
+            edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap);edit.setPlainText(self.diff[key])
+            edit.display_line_numbers=self.diff[key+'_numbers']
+            edit.line_highlights={row:colors[color] for row,color in self.diff[key+'_colors'].items()}
+            edit.highlight_current_line();column.addWidget(edit,1);splitter.addWidget(panel);setattr(self,key+'_edit',edit)
+        self.before_edit.verticalScrollBar().valueChanged.connect(self.after_edit.verticalScrollBar().setValue)
+        self.after_edit.verticalScrollBar().valueChanged.connect(self.before_edit.verticalScrollBar().setValue)
+        buttons=QHBoxLayout()
+        for text,step in (('이전 변경',-1),('다음 변경',1)):
+            button=QPushButton(text);button.setAutoDefault(False);button.setEnabled(bool(self.diff['changes']))
+            button.clicked.connect(lambda _checked=False,step=step:self.jump_change(step));buttons.addWidget(button)
+        buttons.addStretch();close=QPushButton('닫기');close.clicked.connect(self.accept);buttons.addWidget(close);layout.addLayout(buttons)
+        if self.diff['changes']:self.jump_change(1)
+
+    def jump_change(self, step):
+        if not self.diff['changes']:return
+        self.change_index=(self.change_index+step)%len(self.diff['changes']);number=self.diff['changes'][self.change_index]
+        for edit in (self.before_edit,self.after_edit):
+            edit.setTextCursor(QTextCursor(edit.document().findBlockByNumber(number)));edit.centerCursor()
+
+
+class FunctionReplaceDialog(QDialog):
+    def __init__(self, parent, span, source, dark=True):
+        super().__init__(parent);self.span=span;self.source=source;self.replacement=None
+        self.start,self.end=python_function_offsets(source,span);self.original=source[self.start:self.end]
+        self.setWindowTitle('함수 교체 · '+span.name);self.setWindowIcon(application_icon());self.resize(940,740)
+        layout=QVBoxLayout(self);label=QLabel(span.label+'\n함수 이름과 데코레이터(@…)를 포함한 전체 코드를 넣으세요. 들여쓰기는 기존 위치에 맞춥니다.')
+        label.setWordWrap(True);label.setTextFormat(Qt.TextFormat.PlainText);layout.addWidget(label)
+        self.edit=SourceTextEdit(self,dark=dark);self.edit.set_python_mode(True)
+        self.edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap);self.edit.setPlainText(self.original);layout.addWidget(self.edit,1)
+        self.message=QLabel();self.message.setTextFormat(Qt.TextFormat.PlainText);self.message.setWordWrap(True);layout.addWidget(self.message)
+        buttons=QHBoxLayout();compare=QPushButton('수정 전후 비교');compare.clicked.connect(self.show_comparison);buttons.addWidget(compare)
+        buttons.addStretch();self.apply_button=QPushButton('편집기에 적용');self.apply_button.clicked.connect(self.accept);buttons.addWidget(self.apply_button)
+        cancel=QPushButton('취소');cancel.clicked.connect(self.reject);buttons.addWidget(cancel);layout.addLayout(buttons)
+        for button in (compare,self.apply_button,cancel):button.setAutoDefault(False)
+        self.edit.textChanged.connect(self.clear_error);self.edit.selectAll();self.edit.setFocus()
+
+    def clear_error(self):
+        self.message.clear();self.edit.error_line=None;self.edit.highlight_current_line()
+
+    def prepared(self):
+        return prepare_python_function_replacement(self.edit.toPlainText(),self.span,
+            self.original.endswith('\n') or self.end<len(self.source))
+
+    def show_comparison(self):
+        try:value=self.prepared()
+        except (SyntaxError,ValueError,tokenize.TokenError,IndentationError,RecursionError,MemoryError):value=self.edit.toPlainText()
+        dialog=CodeDiffDialog(self,self.original,value,'함수 수정 전후 비교 · '+self.span.name,self.edit.dark,
+            before_caption='수정 전 · 교체 전 함수')
+        dialog.exec();dialog.deleteLater()
+
+    def accept(self):
+        try:value=self.prepared()
+        except (SyntaxError,ValueError,tokenize.TokenError,IndentationError,RecursionError,MemoryError) as exc:
+            self.message.setStyleSheet('color:#cf3654;');self.message.setText('교체 코드 오류: '+str(getattr(exc,'msg',exc)));return
+        error=python_syntax_error(self.source[:self.start]+value+self.source[self.end:],self.parent().path)
+        if error is not None:
+            line=getattr(error,'lineno',None)
+            self.message.setStyleSheet('color:#cf3654;');self.message.setText(
+                '전체 코드 문법 오류'+(f' · {line:,}줄' if line else '')+' · '+str(getattr(error,'msg',error)))
+            local=(line or 0)-self.span.start_line
+            if 0<=local<self.edit.blockCount():
+                self.edit.error_line=local;self.edit.highlight_current_line()
+                self.edit.setTextCursor(QTextCursor(self.edit.document().findBlockByNumber(local)));self.edit.centerCursor()
+            self.edit.setFocus();return
+        self.replacement=value;super().accept()
+
+
 class PlainTextEditor(QDialog):
     """Native plain-text editing; source is never imported/executed or read as HTML."""
     def __init__(self, owner, path, start=0, expected_sha='', encoding='auto'):
         super().__init__(owner)
-        self.setWindowTitle('텍스트 본문 편집 · '+Path(path).name)
         self.setWindowIcon(application_icon())
         self.resize(1020, 800); self.setMinimumSize(620, 440)
         encoding = encoding if encoding in TEXT_ENCODING_CHOICES else 'auto'
         self.path = str(path); self.state = None; self.saved_path = ''; self.last_backup = ''
         self.initial_editor_text = ''; self.start_offset = start; self.display_sha = expected_sha
+        self.function_source=None;self.function_spans=[];self.syntax_error=None;self.syntax_checked=False
+        self.function_timer=QTimer(self);self.function_timer.setSingleShot(True);self.function_timer.setInterval(650)
+        self.function_timer.timeout.connect(self.refresh_functions)
         layout = QVBoxLayout(self)
-        hint = QLabel('실제 텍스트 편집 · 읽기 화면의 자동 줄바꿈은 파일에 추가하지 않습니다. PY·스크립트를 실행하지 않습니다.')
-        hint.setWordWrap(True); layout.addWidget(hint)
+        self.hint=QLabel();self.hint.setWordWrap(True);layout.addWidget(self.hint)
         row = QHBoxLayout(); row.addWidget(QLabel('읽기 인코딩'))
         self.codec = QComboBox()
         for code in TEXT_ENCODING_CHOICES:
@@ -9819,16 +11151,36 @@ class PlainTextEditor(QDialog):
         reload_button = QPushButton('다시 읽기'); reload_button.clicked.connect(self.reload_file); row.addWidget(reload_button)
         self.wrap = QCheckBox('화면 줄바꿈'); self.wrap.setChecked(True); row.addWidget(self.wrap)
         layout.addLayout(row)
-        self.edit = QPlainTextEdit(); self.edit.setFont(QFont('Consolas', 12))
+        self.code_tools=QWidget();tools=QHBoxLayout(self.code_tools);tools.setContentsMargins(0,0,0,0)
+        self.function_combo=QComboBox();self.function_combo.setEditable(True);self.function_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.function_combo.setMinimumWidth(150);self.function_combo.setSizePolicy(QSizePolicy.Policy.Ignored,QSizePolicy.Policy.Fixed)
+        self.function_combo.completer().setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        self.function_combo.completer().setFilterMode(Qt.MatchFlag.MatchContains);self.function_combo.completer().setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.function_combo.setToolTip('함수·메서드 이름을 입력해 찾습니다. 선택하면 함수 전체 범위를 잡습니다.');tools.addWidget(self.function_combo,1)
+        self.function_combo.activated.connect(lambda _index:self.select_function())
+        self.select_function_button=QPushButton('함수 선택');self.select_function_button.clicked.connect(self.select_function);tools.addWidget(self.select_function_button)
+        self.replace_function_button=QPushButton('함수 교체');self.replace_function_button.clicked.connect(self.replace_function);tools.addWidget(self.replace_function_button)
+        compare=QPushButton('전후 비교');compare.clicked.connect(self.show_comparison);tools.addWidget(compare)
+        check=QPushButton('문법 검사');check.clicked.connect(lambda:self.check_syntax());tools.addWidget(check)
+        for button in (self.select_function_button,self.replace_function_button,compare,check):button.setAutoDefault(False)
+        layout.addWidget(self.code_tools)
+        self.edit = SourceTextEdit(self,dark=getattr(owner,'dark',True)); self.edit.setFont(QFont('Consolas', 12))
         self.edit.setTabStopDistance(self.edit.fontMetrics().horizontalAdvance(' ')*4)
         self.edit.setPlaceholderText('텍스트가 비어 있습니다. 입력한 뒤 저장할 수 있습니다.')
         self.wrap.toggled.connect(lambda v:self.edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth if v else QPlainTextEdit.LineWrapMode.NoWrap))
         self.edit.textChanged.connect(self.update_status)
+        self.edit.textChanged.connect(self.code_text_changed)
+        self.edit.cursorPositionChanged.connect(self.update_status)
         layout.addWidget(self.edit, 1)
+        syntaxrow=QHBoxLayout();self.syntax_status=QLabel();self.syntax_status.setWordWrap(True);self.syntax_status.setTextFormat(Qt.TextFormat.PlainText)
+        self.syntax_status.hide();syntaxrow.addWidget(self.syntax_status,1)
+        self.syntax_jump=QPushButton('오류 위치');self.syntax_jump.setAutoDefault(False);self.syntax_jump.clicked.connect(self.go_to_syntax_error)
+        self.syntax_jump.hide();syntaxrow.addWidget(self.syntax_jump);layout.addLayout(syntaxrow)
         searchrow = QHBoxLayout(); self.search = QLineEdit(); self.search.setPlaceholderText('찾을 문자열 · Enter 다음 찾기')
         self.search.returnPressed.connect(self.find_next); searchrow.addWidget(self.search, 1)
         btn = QPushButton('다음 찾기'); btn.clicked.connect(self.find_next); searchrow.addWidget(btn)
         layout.addLayout(searchrow)
+        self.cursor_status=QLabel();layout.addWidget(self.cursor_status)
         self.status = QLabel(); self.status.setWordWrap(True); layout.addWidget(self.status)
         buttons = QHBoxLayout(); self.save_codec = QComboBox(); self.save_codec.addItem('저장: 원래 인코딩·BOM 유지', 'preserve')
         self.save_codec.addItem('저장: UTF-8', 'utf-8'); self.save_codec.addItem('저장: UTF-8 BOM', 'utf-8-sig')
@@ -9839,7 +11191,20 @@ class PlainTextEditor(QDialog):
         layout.addLayout(buttons)
         self.shortcut_save = QShortcut(QKeySequence('Ctrl+S'), self); self.shortcut_save.activated.connect(lambda:self.save_file(False))
         self.shortcut_find = QShortcut(QKeySequence('Ctrl+F'), self); self.shortcut_find.activated.connect(self.search.setFocus)
+        self.configure_editor()
         self.load_file(encoding)
+
+    def configure_editor(self):
+        python=Path(self.path).suffix.lower() in ('.py','.pyw')
+        changed=python!=self.edit.python_mode;self.edit.set_python_mode(python)
+        if changed:self.wrap.setChecked(not python)
+        self.code_tools.setVisible(python)
+        if python:self.refresh_functions()
+        else:self.function_timer.stop();self.clear_syntax_result()
+        self.cursor_status.setVisible(python)
+        self.setWindowTitle(('Python 코드 편집 · ' if python else '텍스트 본문 편집 · ')+Path(self.path).name)
+        self.hint.setText('Python · Tab 들여쓰기 / Shift+Tab 내어쓰기 / Enter 자동 들여쓰기 · Ctrl+F 찾기 / Ctrl+S 저장' if python else
+            '실제 텍스트 편집 · 읽기 화면의 자동 줄바꿈은 파일에 추가하지 않습니다. PY·스크립트를 실행하지 않습니다.')
 
     def load_file(self, encoding):
         try: state = read_plain_text(self.path, encoding)
@@ -9849,7 +11214,7 @@ class PlainTextEditor(QDialog):
             return False
         self.state = state; self.edit.setReadOnly(False)
         self.edit.setPlainText(state.text); self.initial_editor_text = self.edit.toPlainText()
-        self.edit.document().setModified(False)
+        self.edit.document().setModified(False);self.clear_syntax_result();self.function_source=None;self.refresh_functions()
         # Qt positions are UTF-16 units, not Python Unicode scalar offsets.
         position = len(state.text[:self.start_offset].encode('utf-16-le'))//2
         cursor = self.edit.textCursor(); cursor.setPosition(min(position, self.edit.document().characterCount()-1)); self.edit.setTextCursor(cursor)
@@ -9862,8 +11227,108 @@ class PlainTextEditor(QDialog):
     def changed(self):
         return self.state is not None and self.edit.document().isModified()
 
+    def clear_syntax_result(self):
+        self.syntax_error=None;self.syntax_checked=False;self.syntax_status.hide();self.syntax_jump.hide()
+        self.edit.error_line=None;self.edit.highlight_current_line()
+
+    def code_text_changed(self):
+        self.clear_syntax_result()
+        if self.edit.python_mode:
+            self.function_combo.setEnabled(False);self.select_function_button.setEnabled(False);self.replace_function_button.setEnabled(False);self.function_timer.start()
+
+    def refresh_functions(self):
+        self.function_timer.stop()
+        if not self.edit.python_mode:return
+        source=self.edit.toPlainText()
+        if source==self.function_source:
+            self.function_combo.setEnabled(bool(self.function_spans));self.select_function_button.setEnabled(bool(self.function_spans));self.replace_function_button.setEnabled(bool(self.function_spans));return
+        previous=self.function_combo.currentData();self.function_source=source
+        error=None
+        try:self.function_spans=python_function_spans(source,self.path)
+        except (SyntaxError,ValueError,RecursionError,MemoryError) as exc:self.function_spans=[];error=exc
+        self.function_combo.blockSignals(True);self.function_combo.clear()
+        for span in self.function_spans:self.function_combo.addItem(span.label,span)
+        index=next((i for i,f in enumerate(self.function_spans) if previous and f.name==previous.name and f.start_line==previous.start_line),-1)
+        if index<0 and previous:
+            matches=[(i,f) for i,f in enumerate(self.function_spans) if f.name==previous.name]
+            if matches:index=min(matches,key=lambda item:abs(item[1].start_line-previous.start_line))[0]
+        if index<0:
+            line=self.edit.textCursor().blockNumber()+1
+            candidates=[(i,f) for i,f in enumerate(self.function_spans) if f.start_line<=line<=f.end_line]
+            if candidates:index=min(candidates,key=lambda item:item[1].end_line-item[1].start_line)[0]
+        if index>=0:self.function_combo.setCurrentIndex(index)
+        elif self.function_spans:self.function_combo.setCurrentIndex(0)
+        self.function_combo.lineEdit().setPlaceholderText('문법 오류 · [문법 검사]로 확인' if error else '함수 이름으로 찾기' if self.function_spans else '함수가 없습니다.')
+        self.function_combo.setToolTip('문법 오류로 함수 목록을 갱신할 수 없습니다. [문법 검사]로 오류 위치를 확인하세요.' if error else
+            f'{len(self.function_spans):,}개 함수 · 이름 검색 / 데코레이터·메서드·중첩 함수 포함')
+        self.function_combo.blockSignals(False)
+        enabled=bool(self.function_spans);self.function_combo.setEnabled(enabled);self.select_function_button.setEnabled(enabled);self.replace_function_button.setEnabled(enabled)
+
+    def current_function(self):
+        previous=self.function_combo.currentData();typed=self.function_combo.currentText();self.refresh_functions()
+        if typed and previous and typed!=previous.label:
+            exact=next((f for f in self.function_spans if f.label==typed or f.name==typed),None)
+            if exact is not None:self.function_combo.setCurrentIndex(self.function_spans.index(exact));return exact
+            return None
+        return self.function_combo.currentData()
+
+    def select_function(self):
+        span=self.current_function()
+        if span is None:return False
+        document=self.edit.document();start=document.findBlockByNumber(span.start_line-1);end=document.findBlockByNumber(span.end_line)
+        cursor=QTextCursor(document);cursor.setPosition(end.position() if end.isValid() else document.characterCount()-1)
+        cursor.setPosition(start.position(),QTextCursor.MoveMode.KeepAnchor)
+        self.edit.setTextCursor(cursor);self.edit.setFocus();self.edit.ensureCursorVisible();return True
+
+    def replace_function(self):
+        span=self.current_function()
+        if span is None:return False
+        source=self.edit.toPlainText();dialog=FunctionReplaceDialog(self,span,source,self.edit.dark)
+        accepted=dialog.exec()==QDialog.DialogCode.Accepted;value=dialog.replacement;start,end=dialog.start,dialog.end
+        dialog.deleteLater()
+        if not accepted or value is None:return False
+        if self.edit.toPlainText()!=source:
+            QMessageBox.warning(self,'함수 교체','편집 내용이 바뀌었습니다. 함수를 다시 선택해서 교체하세요.');return False
+        if source[start:end]==value:return True
+        document=self.edit.document();first=document.findBlockByNumber(span.start_line-1);last=document.findBlockByNumber(span.end_line)
+        cursor=QTextCursor(document);cursor.setPosition(first.position())
+        cursor.setPosition(last.position() if last.isValid() else document.characterCount()-1,QTextCursor.MoveMode.KeepAnchor)
+        start_position=cursor.selectionStart();cursor.beginEditBlock();cursor.insertText(value);cursor.endEditBlock()
+        cursor.setPosition(start_position);self.edit.setTextCursor(cursor);self.edit.setFocus();self.edit.centerCursor()
+        self.refresh_functions();return True
+
+    def show_comparison(self):
+        dialog=CodeDiffDialog(self,self.initial_editor_text,self.edit.toPlainText(),
+            '수정 전후 비교 · '+Path(self.path).name,self.edit.dark)
+        dialog.exec();dialog.deleteLater()
+
+    def check_syntax(self, source=None, filename=None):
+        value=self.edit.toPlainText() if source is None else source
+        error=python_syntax_error(value,filename or self.path);self.syntax_checked=True;self.syntax_error=error
+        self.syntax_status.show();version=f'Python {sys.version_info.major}.{sys.version_info.minor}'
+        if error is None:
+            self.syntax_status.setStyleSheet('color:#268b54;');self.syntax_status.setText('문법 검사 통과 · '+version)
+            self.syntax_jump.hide();self.edit.error_line=None;self.edit.highlight_current_line();return True
+        line=getattr(error,'lineno',None);column=getattr(error,'offset',None)
+        self.syntax_status.setStyleSheet('color:#cf3654;')
+        self.syntax_status.setText('문법 오류'+(f' · {line:,}행' if line else '')+(f' {column:,}열' if column else '')+
+            ' · '+str(getattr(error,'msg',error))+' · '+version+'\n문법 오류를 수정한 뒤 저장하세요.')
+        self.syntax_jump.setVisible(bool(line));self.go_to_syntax_error();return False
+
+    def go_to_syntax_error(self):
+        line=getattr(self.syntax_error,'lineno',None)
+        if not line:return
+        block=self.edit.document().findBlockByNumber(min(max(0,line-1),self.edit.blockCount()-1))
+        column=max(0,(getattr(self.syntax_error,'offset',None) or 1)-1)
+        position=block.position()+len(block.text()[:column].encode('utf-16-le'))//2
+        cursor=QTextCursor(block);cursor.setPosition(position);self.edit.setTextCursor(cursor);self.edit.setFocus();self.edit.centerCursor()
+        self.edit.error_line=block.blockNumber();self.edit.highlight_current_line()
+
     def update_status(self):
         if not hasattr(self, 'status') or not self.state: return
+        if self.edit.python_mode:
+            cursor=self.edit.textCursor()
+            self.cursor_status.setText(f'Python · 행 {cursor.blockNumber()+1:,} · 열 {len(self.edit.text_prefix(cursor).expandtabs(4))+1:,} · 들여쓰기 4칸')
         ending = {'\r\n':'CRLF', '\n':'LF', '\r':'CR'}[self.state.newline]
         mark = '수정 중 · ' if self.changed() else ''
         self.status.setText(f'{mark}{self.state.codec}{" · BOM" if self.state.bom else ""} · 줄끝 {ending}'
@@ -9892,6 +11357,8 @@ class PlainTextEditor(QDialog):
             if not target: return False
             if Path(target).suffix == '': target += p.suffix
             if Path(target).resolve() == Path(self.path).resolve(): save_as=False
+        value = self.state.text if not self.changed() else self.edit.toPlainText()
+        if Path(target).suffix.lower() in ('.py','.pyw') and not self.check_syntax(value,target):return False
         if not save_as or Path(target).exists():
             if QMessageBox.question(self, '텍스트 저장', '이 파일을 갱신할까요? 기존 내용은 .bak 파일로 보존합니다.\n\n'+str(target),
                     QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
@@ -9901,13 +11368,12 @@ class PlainTextEditor(QDialog):
                 except OSError as exc: QMessageBox.warning(self,'저장 실패',str(exc)); return False
         try:
             # QPlainTextEdit normalizes some Unicode separators. Preserve the original if no edit.
-            value = self.state.text if not self.changed() else self.edit.toPlainText()
             result = write_plain_text(self.state, value, target, self.save_codec.currentData(), expected)
             self.last_backup = result['backup']; self.saved_path = result['path']; self.path = result['path']
             self.state = read_plain_text(self.path, 'auto' if self.save_codec.currentData() != 'preserve' or self.state.codec not in TEXT_ENCODING_CHOICES else self.state.codec)
             self.initial_editor_text = self.edit.toPlainText(); self.edit.document().setModified(False)
             self.status.setText('저장 후 재읽기 확인 완료.\n'+self.path+ ('\n백업: '+self.last_backup if self.last_backup else ''))
-            self.setWindowTitle('텍스트 본문 편집 · '+Path(self.path).name)
+            self.configure_editor()
             return True
         except Exception as exc:
             QMessageBox.warning(self, '텍스트 저장 실패', str(exc)); return False
@@ -10139,11 +11605,12 @@ class PreviewDialog(QDialog):
         self.move_timer.timeout.connect(self.commit_move)
         self.view = ZoomView(self)
         self.view.editor = self
-        self.view.setBackgroundBrush(QColor('#181b24' if owner.dark else '#edf0f5'))
+        self.view.setBackgroundBrush(self.reading_background())
         self.view.setToolTip('파일 드롭: 오른쪽 비교 파일 넣기 · 키/휠 설정: 정 → 단축키' if self.dual_secondary else
             '파일 드롭: 새로 열기 · 우클릭: 글/그림 편집 · 키/휠 설정: 정 → 단축키')
         if self.dual_secondary:self.setAcceptDrops(True)
         layout = QVBoxLayout(self); layout.setContentsMargins(0, 0, 0, 0);layout.setSpacing(0)
+        self.main_layout=layout
         self.dual_bar=QWidget(self)
         dualrow=QHBoxLayout(self.dual_bar);dualrow.setContentsMargins(6,3,6,3);dualrow.setSpacing(5)
         self.dual_caption=QLabel('오른쪽' if self.dual_secondary else '왼쪽')
@@ -10201,7 +11668,9 @@ class PreviewDialog(QDialog):
         self.text_shortcut.activated.connect(lambda:self.owner.edit_text_source(self.page) if self.page.is_text_document and not self.dual_secondary else None)
         self.text_shortcut.setEnabled(not self.dual_secondary)
         if self.dual_secondary:self.text_edit_button.setEnabled(False)
-        layout.addWidget(self.view)
+        self.view_container=QWidget(self);self.view_row=QHBoxLayout(self.view_container)
+        self.view_row.setContentsMargins(0,0,0,0);self.view_row.setSpacing(0)
+        self.view_row.addWidget(self.view,1);layout.addWidget(self.view_container,1)
         self.backend = PdfBackend(self,lazy=True)
         self.backend.preview.connect(self.got_image)
         self.backend.editInfo.connect(self.got_info)
@@ -10211,6 +11680,7 @@ class PreviewDialog(QDialog):
         self.format_backend.preview.connect(self.got_format_preview)
         self.image_backend=ImageBackend(self) if self.dual_secondary else owner.preview_image_backend
         self.image_backend.preview.connect(self.got_image)
+        owner.reading_renderer.attach_image_reader(self.image_backend)
         self.gif_movie=None;self.gif_buffer=None;self.gif_key='';self.gif_token=0;self.gif_size=(0,0)
         self.image_backend.animation.connect(self.got_animation)
         self.guide = QLabel(self.view.viewport())
@@ -10338,9 +11808,11 @@ class PreviewDialog(QDialog):
         self.refine = QTimer(self); self.refine.setSingleShot(True)
         self.refine.setInterval(180); self.refine.timeout.connect(self.request_image)
         self.view.zoomChanged.connect(self.changed_zoom)
-        pix = owner.thumbs.get((page.path, page.number))
+        owner.reading_renderer.begin(self,0,0)
+        pix = owner.reading_renderer.lookup(page)
+        if pix is None:pix=owner.thumbs.get((page.path,page.number))
         if pix is not None:
-            self.view.set_image(pix)
+            self.set_reading_image(pix)
         self.changed_zoom()
         self.update_navigation()
         QTimer.singleShot(0, self.request_image)
@@ -10473,7 +11945,7 @@ class PreviewDialog(QDialog):
         if self.inline_text.isVisible():self.inline_text.setFocus()
 
     def update_text_controls(self):
-        self.text_controls.setVisible(self.page.is_text_document)
+        self.text_controls.setVisible(self.page.is_text_document and not self.owner.book_focus)
         data=self.page.text_info or {}
         if self.page.is_text_document:
             self.text_caption.setText(self.page.document_kind+' · '+data.get('encoding',''))
@@ -10489,6 +11961,18 @@ class PreviewDialog(QDialog):
         options=text_render_options({'font_size':self.read_size.value(),'line_spacing':self.read_spacing.value(),'tab_size':4})
         self.owner.queue_live_text_style(self.page,options)
 
+    def reading_background(self):
+        if self.page.is_text_document and self.owner.text_dark:return QColor('#121824')
+        return QColor('#181b24' if self.owner.dark else '#edf0f5')
+
+    def set_reading_image(self,pix):
+        if pix.isNull():return
+        # Cached thumbnails and full previews share the same first-paint palette.
+        # Keep the original so theme changes never invert an already inverted image.
+        self.reading_base_pix=QPixmap(pix)
+        self.view.setBackgroundBrush(self.reading_background())
+        self.view.set_image(self.reading_pixmap(self.reading_base_pix))
+
     def reading_pixmap(self,pix):
         if not self.page.is_text_document or not self.owner.text_dark:return pix
         image=pix.toImage().convertToFormat(QImage.Format.Format_RGB32);image.invertPixels()
@@ -10497,6 +11981,7 @@ class PreviewDialog(QDialog):
         return QPixmap.fromImage(image)
 
     def update_reading_palette(self):
+        self.view.setBackgroundBrush(self.reading_background())
         if self.page.is_text_document and not self.reading_base_pix.isNull():self.view.set_image(self.reading_pixmap(self.reading_base_pix))
         self.update_text_controls()
 
@@ -10525,11 +12010,13 @@ class PreviewDialog(QDialog):
                 if hasattr(self,'bulk_bar'):self.update_bulk_bar()
         if hasattr(self,'book_blank_label'):
             self.book_blank_label.setGeometry(self.view.viewport().rect());self.book_blank_label.setVisible(self.book_blank)
-            if hasattr(self,'nav_label'):self.nav_label.setVisible(not self.book_blank)
+            if hasattr(self,'nav_label'):self.nav_label.setVisible(not self.book_blank and not (self.embedded and self.owner.dual_mode))
             if self.book_blank:self.book_blank_label.raise_()
         if hasattr(self,'actions'):self.actions.place()
         if hasattr(self,'nav_label'):
             viewport=self.view.viewport()
+            if self.embedded and self.owner.book_focus:
+                self.nav_previous.hide();self.nav_next.hide();self.guide.hide()
             self.nav_previous.move(8,max(4,(viewport.height()-self.nav_previous.height())//2))
             self.nav_next.move(max(8,viewport.width()-self.nav_next.width()-8),max(4,(viewport.height()-self.nav_next.height())//2))
             self.nav_previous.raise_();self.nav_next.raise_()
@@ -10540,6 +12027,9 @@ class PreviewDialog(QDialog):
             if self.difference_overlay.isVisible():self.difference_overlay.raise_()
         if hasattr(self,'format_overlay') and self.format_overlay.isVisible():
             self.format_overlay.setGeometry(self.view.viewport().rect());self.format_overlay.raise_()
+        footer=getattr(self.owner,'reading_footer',None)
+        if footer is not None and self.embedded:footer.sync()
+        if self.embedded:self.owner.position_focus_restore()
 
     def request_text_backdrop(self):
         if not self.selected_text or not self.ready() or self.mode!='edit':return
@@ -10881,6 +12371,8 @@ class PreviewDialog(QDialog):
         previous_uid=self.page.uid
         self.stop_gif()
         switching=self.page.uid!=page.uid
+        # 수정본/회전본은 uid가 같아도 페이지 크기가 달라질 수 있다.
+        self.view.pdf_size=None
         if switching:
             self.move_focus_until=0.0;self.move_focus_timer.stop()
             if page.uid!=self.first_page_hint_uid:self.first_page_hint_uid=None
@@ -10888,10 +12380,11 @@ class PreviewDialog(QDialog):
             self.restore_vector=self.after_vector=None
             self.bulk_restore=None;self.after_bulk=None;self.pending_bundle=None
             self.view.fit_timer.stop()
-            self.view.scene().clear();self.view.item=None;self.view.pdf_size=None
+            self.view.scene().clear();self.view.item=None
             self.view.resetTransform();self.view.auto_fit=True
         self.page = page; self.info = None; self.loading_info = False
         self.reading_base_pix=QPixmap()
+        self.view.setBackgroundBrush(self.reading_background())
         self.update_text_controls()
         if page.is_text_document:self.set_mode('pan')
         if page.is_document_card:self.set_mode('pan')
@@ -10907,10 +12400,12 @@ class PreviewDialog(QDialog):
         self.view.clear_gesture()
         self.view.range_start=self.view.range_end=self.view.range_screen_start=None
         self.backend.jobs = [j for j in self.backend.jobs if j['op'] not in ('preview', 'editinfo')]
-        self.image_backend.cancel_pending()
+        self.owner.reading_renderer.cancel_image_preview(self)
+        self.owner.reading_renderer.begin(self,0,0)
         if switching:
-            pix=self.owner.thumbs.get((page.path,page.number))
-            if pix is not None:self.view.set_image(pix)
+            pix=self.owner.reading_renderer.lookup(page)
+            if pix is None:pix=self.owner.thumbs.get((page.path,page.number))
+            if pix is not None:self.set_reading_image(pix)
         self.changed_zoom(); self.request_image()
         if self.mode != 'pan':
             self.request_info()
@@ -10944,6 +12439,7 @@ class PreviewDialog(QDialog):
         self.setWindowTitle(f'{Path(self.page.label_path).name} · {self.current_index()+1}/{len(self.owner.pages)} · {percent}%{mark}')
         if self.embedded and not self.dual_secondary:
             self.owner.setWindowTitle(f'{APP_NAME} · {Path(self.page.input_path or self.page.label_path).name}')
+            self.owner.update_preview_zoom(self)
         self.refine.start()
 
     def request_image(self):
@@ -10975,20 +12471,26 @@ class PreviewDialog(QDialog):
         self.token = self.owner.next_preview_token()
         engine=self.image_backend if picture else self.backend
         self.backend.jobs = [j for j in self.backend.jobs if j['op'] != 'preview']
-        self.image_backend.jobs = [j for j in self.image_backend.jobs if j['op']=='release']
+        self.owner.reading_renderer.begin(self,side,self.token)
+        self.owner.reading_renderer.cancel_image_preview(self)
+        cached=self.owner.reading_renderer.lookup(self.page,side)
+        if cached is not None:
+            self.got_image(self.token,cached,'');return
+        if self.owner.reading_renderer.claim_image(self,side,self.token):return
         engine.request('preview', self.page.path, self.page.number,
                              token=self.token, priority=True, max_side=side)
 
     def show_thumbnail(self,path,number,pix):
         # 늦게 도착한 썸네일도 첫 화면에 사용. 새 파일/수정본/선명한 화면을 덮지 않는다.
-        if (self.closed or self.preview_ready or not is_image_source(self.page.path) or
+        if (self.closed or self.preview_ready or not (is_image_source(self.page.path) or self.page.is_text_document) or
                 (path,number)!=(self.page.path,self.page.number) or pix.isNull()):return
         if self.view.item is None:
-            self.view.set_image(pix)
+            self.set_reading_image(pix)
 
     def got_image(self, token, pix, error):
         if self.closed or token != self.token:
             return
+        self.owner.reading_renderer.complete(self,token,pix,error)
         committing=self.format_commit is not None and self.format_applied
         if self.selected_vector and self.vector_backdrop_token is not None:return
         if not committing and (self.format_dirty or (self.inline_text.isVisible() and self.backdrop_token is not None and not self.text_move_mode)):return
@@ -10997,7 +12499,7 @@ class PreviewDialog(QDialog):
             if not committing:QMessageBox.warning(self, '크게 보기', error)
         else:
             self.preview_ready=True
-            self.reading_base_pix=QPixmap(pix);self.view.set_image(self.reading_pixmap(pix))
+            self.set_reading_image(pix)
             self.start_gif()
             if self.owner.book_mode:self.book_turn.reveal()
             self.position_controls()
@@ -11049,12 +12551,15 @@ class PreviewDialog(QDialog):
 
     def shutdown(self):
         if not self.closed:
+            session=getattr(self.owner,'page_number_session',None)
+            if session is not None and session.editor is self:session.close()
             QApplication.instance().removeEventFilter(self)
             self.outside_timer.stop();self.format_watchdog.stop()
             self.book_turn.stop();self.cancel_eyedropper()
             self.cancel_format_preview(refresh=False);self.format_backend.stop()
             self.stop_gif();self.image_backend.animation.disconnect(self.got_animation)
             self.closed = True
+            self.owner.reading_renderer.detach(self)
             self.difference_overlay.timer.stop();self.difference_overlay.hide()
             if not self.dual_secondary and self.owner.dual_mode:self.owner.close_dual_mode(animate=False)
             self.view.fit_timer.stop()
@@ -11569,6 +13074,8 @@ class PreviewDialog(QDialog):
         return next((i for i,p in enumerate(self.navigation_pages()) if p.uid==self.page.uid),0)
 
     def navigate_to_page(self,page,select=True):
+        session=getattr(self.owner,'page_number_session',None)
+        if session is not None and session.active and session.editor is self:return False
         if self.closed or page.uid not in self.owner.by_id:return False
         if self.owner.book_mode:
             self.owner.show_book_spread(page,secondary=self.dual_secondary);return True
@@ -11585,8 +13092,10 @@ class PreviewDialog(QDialog):
 
     def update_navigation(self):
         if not hasattr(self,'nav_previous'):return
-        visible=bool(self.owner.pages)
-        self.nav_previous.setVisible(visible);self.nav_next.setVisible(visible)
+        visible=bool(self.owner.pages) and not (self.embedded and self.owner.book_focus)
+        book=self.owner.dual_mode and self.owner.book_mode
+        self.nav_previous.setVisible(visible and not (book and self.dual_secondary))
+        self.nav_next.setVisible(visible and not (book and not self.dual_secondary))
         if not self.nav_scrubbing and self.nav_target_uid is None:self.nav_display_index=self.navigation_index()
         unit='항목' if any(p.is_document_card for p in self.owner.pages) else '장'
         self.nav_label.set_count(len(self.navigation_pages()),self.navigation_index(),unit)
@@ -11597,6 +13106,8 @@ class PreviewDialog(QDialog):
         self.position_controls()
 
     def request_navigation(self,index,scrub=False,select=True):
+        session=getattr(self.owner,'page_number_session',None)
+        if session is not None and session.active and session.editor is self:return
         if self.closed or not self.owner.pages:return
         if self.dual_secondary:select=False
         modal=QApplication.activeModalWidget()
@@ -11675,14 +13186,16 @@ class PreviewDialog(QDialog):
     def select_range(self,rect,additive=False):
         if self.finish_text_edit(lambda:self.select_range(rect,additive)):return
         if not self.ready():return
-        items=list(self.bulk_items) if additive else []
+        current=self.single_selection()
+        items=(list(self.bulk_items) or ([current] if current else [])) if additive else []
         keys={self.item_key(v) for v in items}
+        padding=3*self.info['width']/max(.001,self.view.page_rect.width()*self.view.transform().m11())
         for item in self.edit_objects():
             if item.get('kind')=='vector':
-                hit=any(segment_in_rect(a,b,rect,stroke['width']/2) for stroke in item['strokes'] for a,b in stroke['segments'])
+                hit=any(segment_in_rect(a,b,rect,padding+stroke['width']/2) for stroke in item['strokes'] for a,b in stroke['segments'])
             else:
                 r=item['rect']
-                hit=(r[0]<=rect[2] and rect[0]<=r[2] and r[1]<=rect[3] and rect[1]<=r[3]) if 'text' in item else (rect[0]<=r[0] and rect[1]<=r[1] and rect[2]>=r[2] and rect[3]>=r[3])
+                hit=r[0]<=rect[2]+padding and rect[0]-padding<=r[2] and r[1]<=rect[3]+padding and rect[1]-padding<=r[3]
             if hit:
                 key=self.item_key(item)
                 if additive and key in keys:items=[v for v in items if self.item_key(v)!=key];keys.remove(key)
@@ -12364,6 +13877,7 @@ class PageCanvas(QAbstractScrollArea):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setStyleSheet('QScrollBar:vertical{width:9px;background:transparent;} QScrollBar::handle:vertical{background:#52596c;border-radius:4px;min-height:30px;} QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}')
         self.selected = set()
+        self.selection_order = []
         self.anchor = None
         self.positions, self.velocities = {}, {}
         self.targets = {}
@@ -12387,6 +13901,7 @@ class PageCanvas(QAbstractScrollArea):
         self.wheel_remainder = 0.0
         self.wheel_precise = None
         self.page_count=PageCountLabel(self.viewport())
+        self.selectionChanged.connect(self.track_selection_order)
         self.selectionChanged.connect(self.viewport().update)
         self.verticalScrollBar().valueChanged.connect(self.on_scroll)
         self.timer = QTimer(self)
@@ -12599,6 +14114,15 @@ class PageCanvas(QAbstractScrollArea):
                 p.drawRoundedRect(br,5,5);p.setPen(QColor('white'))
                 p.setFont(QFont('Arial',9))
                 p.drawText(br,Qt.AlignmentFlag.AlignCenter,str(page.label_number+1))
+            session=self.owner.page_number_session
+            if session is not None:
+                order=next((i for i,target in enumerate(session.targets) if target.uid==page.uid),None)
+                if order is not None:
+                    text=str(session.options['start']+order).zfill(session.options['digits'])
+                    p.setFont(QFont('Arial',10,QFont.Weight.Bold))
+                    badge=QRectF(r.left()+5,r.top()+5,max(25,p.fontMetrics().horizontalAdvance(text)+12),23)
+                    p.setPen(Qt.PenStyle.NoPen);p.setBrush(QColor('#b4294b'));p.drawRoundedRect(badge,5,5)
+                    p.setPen(QColor('white'));p.drawText(badge,Qt.AlignmentFlag.AlignCenter,text)
         if self.owner.pending_import:
             p.setPen(QPen(QColor('#ff4059'),3))
             p.drawArc(QRectF(14,14,20,20),int(self.angle*16),250*16)
@@ -12613,7 +14137,20 @@ class PageCanvas(QAbstractScrollArea):
     def selected_pages(self):
         return [p for p in self.owner.pages if p.uid in self.selected]
 
+    def track_selection_order(self):
+        chosen={p.uid for p in self.owner.pages if p.uid in self.selected}
+        self.selection_order=[uid for uid in self.selection_order if uid in chosen]
+        seen=set(self.selection_order)
+        self.selection_order.extend(p.uid for p in self.owner.pages if p.uid in chosen and p.uid not in seen)
+        self.owner.update_action_states()
+
+    def selected_pages_in_order(self):
+        self.track_selection_order()
+        by_id={p.uid:p for p in self.owner.pages}
+        return [by_id[uid] for uid in self.selection_order]
+
     def contextMenuEvent(self, event):
+        if self.owner.page_number_session is not None:event.accept();return
         if self.dragging or self.cancel_guard is not None or time.monotonic() < self.suppress_context_until:
             event.accept(); return
         uid = self.uid_at(event.pos())
@@ -12631,11 +14168,14 @@ class PageCanvas(QAbstractScrollArea):
             menu.addSeparator()
         menu.addAction('오른쪽에 빈 PDF 페이지 만들기', lambda: self.owner.insert_blank_page(uid))
         menu.addSeparator()
-        copy = menu.addAction('페이지 복사   '+self.owner.keys.describe('copy'), self.owner.copy_pages); copy.setEnabled(bool(self.selected))
-        menu.addAction('오른쪽에 붙여넣기   '+self.owner.keys.describe('paste'), lambda: self.owner.paste_pages(uid))
+        enabled=bool(self.selected) and not self.owner.page_batch_job and not self.owner.page_number_session
+        enabled=enabled and not any(p.is_document_card or p.is_text_document for p in self.selected_pages())
+        for title,turn in [('왼쪽으로 90도 회전',-90),('오른쪽으로 90도 회전',90)]:
+            action=menu.addAction(title,lambda checked=False,value=turn:self.owner.rotate_selected_pages(value));action.setEnabled(enabled)
         menu.exec(event.globalPos()); event.accept()
 
     def mousePressEvent(self, event):
+        if self.owner.page_number_session is not None:event.accept();return
         if event.button() == Qt.MouseButton.RightButton and self.cancel_guard is not None:
             self.cancel_guard.cancel(); return
         if event.button() != Qt.MouseButton.LeftButton:
@@ -12691,16 +14231,6 @@ class PageCanvas(QAbstractScrollArea):
                 if self.pressed_uid in self.selected:
                     self.begin_drag()
             return
-        uid = self.uid_at(event.position())
-        page = self.owner.by_id.get(uid)
-        if page:
-            tip=(f'{Path(page.label_path).name}  ·  {page.document_pages:,}쪽\n더블클릭으로 문서 전체 열기' if page.is_document_card
-                 else f'{Path(page.label_path).name}  ·  {page.label_number+1}쪽')
-            error=self.owner.thumb_errors.get((page.path,page.number))
-            if error:tip+='\n'+error
-            QToolTip.showText(event.globalPosition().toPoint(),tip,self)
-        else:
-            QToolTip.hideText()
 
     def mouseDoubleClickEvent(self, event):
         if event.button() != Qt.MouseButton.LeftButton:
@@ -13365,6 +14895,11 @@ class Window(QMainWindow):
 
     def __init__(self, startup_pdf_count=0):
         super().__init__()
+        app=QApplication.instance()
+        if not hasattr(app,'viewer_hover_help_blocker'):
+            app.viewer_hover_help_blocker=HoverHelpBlocker(app)
+            app.installEventFilter(app.viewer_hover_help_blocker)
+        QToolTip.hideText()
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(application_icon())
         self.resize(1280,850)
@@ -13380,6 +14915,8 @@ class Window(QMainWindow):
         self.repulsion = int(self.settings.value('repulsion',27))
         self.animate = self.settings.value('animate',True,type=bool)
         self.dual_animation = self.settings.value('dual_animation',False,type=bool)
+        try:self.book_gap=max(0,min(240,int(self.settings.value('book/image_gap',0))))
+        except (ValueError,TypeError):self.book_gap=0
         self.dark = self.settings.value('dark',True,type=bool)
         self.separate = self.settings.value('separate',False,type=bool)
         self.rename_after = self.settings.value('rename',True,type=bool)
@@ -13440,6 +14977,9 @@ class Window(QMainWindow):
         self.clipboard_pages = []
         self.clipboard_token = ''
         self.preview_dialog = None
+        self.page_number_session = None
+        self.page_batch_job = None
+        self.page_batch_serial = 0
         self.imports = []
         self.pending_import = None
         self.import_token = 0
@@ -13450,11 +14990,14 @@ class Window(QMainWindow):
         self.backend.metadata.connect(self.got_metadata)
         self.backend.thumbnail.connect(self.got_thumbnail)
         self.backend.released.connect(self.cleanup_working_files)
+        self.page_batch_backend=PdfBackend(self,lazy=True)
+        self.page_batch_backend.pageBatchDone.connect(self.got_page_batch)
         self.navigation_backend=PdfBackend(self,lazy=True)
         self.navigation_backend.siblingReady.connect(self.got_sibling)
         self.navigation_backend.neighborsReady.connect(self.got_neighbor_names)
         self.image_backend=ImageBackend(self);self.image_backend.thumbnail.connect(self.got_thumbnail)
         self.preview_image_backend=ImageBackend(self);self.preview_request_serial=0
+        self.reading_renderer=ReadingRenderScheduler(self)
         self.input_backend=InputBackend(self)
         self.input_backend.itemReady.connect(self.got_input_item)
         self.input_backend.completed.connect(self.got_input_done)
@@ -13476,6 +15019,10 @@ class Window(QMainWindow):
         self.preview_split_sizes=[int(self.width()*.65),int(self.width()*.35)]
         self.dual_mode=False;self.dual_preview=None;self.dual_split_sizes=[1,1]
         self.dual_kind='review';self.book_drop_pending=False;self.book_mode=False;self.book_step=2;self.book_syncing=False;self.book_target_index=None
+        self.book_focus=False
+        self.pending_open_layout=None
+        self.open_layout_timer=QTimer(self);self.open_layout_timer.setSingleShot(True)
+        self.open_layout_timer.timeout.connect(self.apply_open_layout)
         self.text_dark=str(self.settings.value('text/dark','false')).lower()=='true'
         self.pending_text_style=None;self.autobook_seen_sources=set()
         self.text_style_timer=QTimer(self);self.text_style_timer.setSingleShot(True);self.text_style_timer.setInterval(220);self.text_style_timer.timeout.connect(self.apply_live_text_style)
@@ -13491,8 +15038,8 @@ class Window(QMainWindow):
         self.splitter.setStyleSheet('QSplitter::handle{background:#363d4f;} QSplitter::handle:hover{background:#dc425e;}')
         self.preview_host=QWidget(self.splitter)
         preview_layout=QVBoxLayout(self.preview_host);preview_layout.setContentsMargins(0,0,0,0);preview_layout.setSpacing(0)
-        self.preview_header=QLabel('크게 보기',self.preview_host);self.preview_header.setFixedHeight(38)
-        self.preview_header.setStyleSheet('background:#202734;color:#d5dfef;padding-left:10px;')
+        self.preview_header=QLabel('—',self.preview_host);self.preview_header.setFixedHeight(38)
+        self.preview_header.setStyleSheet('background:#202734;color:#aebed3;padding-left:10px;font-size:11px;')
         preview_layout.addWidget(self.preview_header)
         self.preview_splitter=QSplitter(Qt.Orientation.Horizontal,self.preview_host)
         self.preview_splitter.setChildrenCollapsible(True);self.preview_splitter.setHandleWidth(4)
@@ -13505,7 +15052,10 @@ class Window(QMainWindow):
         self.splitter.setSizes(self.preview_split_sizes)
         viewer_row.addWidget(self.splitter)
         self.thumbnail_rail=ThumbnailRail(self,self.content);viewer_row.addWidget(self.thumbnail_rail)
-        self.comparison_notice=QLabel(self.content);self.comparison_notice.setWordWrap(True);self.comparison_notice.hide();content_layout.addWidget(self.comparison_notice)
+        self.reading_footer=ReadingFooter(self,self.content);self.book_gap_footer=self.reading_footer
+        content_layout.addWidget(self.reading_footer)
+        self.book_gap_handle=BookGapHandle(self,self.book_gap_footer)
+        self.comparison_notice=self.reading_footer.notice
         self.dual_handle=self.thumbnail_host.dual_button
         self.dual_progress=0.;self.dual_was_collapsed=False
         self.preview_splitter.splitterMoved.connect(lambda _pos,_index:self.dual_handle.place_handle())
@@ -13514,6 +15064,7 @@ class Window(QMainWindow):
         self.setAcceptDrops(True)
         self.actions=CornerActions(self.content,self,self.save_revision,self.translate_current,self.choose_hangul,self.show_settings,self.clear,
                                    right_inset=self.thumbnail_rail.width(),print_document=self.print_document)
+        self.focus_restore=BookFocusRestoreButton(self)
         self.import_progress=ImportProgress(self.content,self.canvas,self.import_status_seconds)
         self.conversion_overlay=ConversionOverlay(self);self.conversion_overlay.cancelled.connect(self.cancel_import)
         self.import_progress.cancelled.connect(self.cancel_import)
@@ -13528,15 +15079,64 @@ class Window(QMainWindow):
         self.place_actions()
 
     def place_actions(self):
+        for editor in (getattr(self,'preview_dialog',None),getattr(self,'dual_preview',None)):
+            if editor is not None and not editor.closed:editor.view.sync_book_layout()
+        if hasattr(self,'reading_footer'):self.reading_footer.sync()
         if hasattr(self,'actions'):
             self.actions.right_inset=max(self.thumbnail_rail.width(),self.content.width()-self.preview_host.width()+6)
             self.actions.place()
         if hasattr(self,'import_progress'):self.import_progress.place()
         if hasattr(self,'conversion_overlay'):self.conversion_overlay.place()
         if hasattr(self,'dual_handle'):self.dual_handle.sync()
+        self.position_focus_restore()
+
+    def position_focus_restore(self):
+        button=getattr(self,'focus_restore',None)
+        if button is None:return
+        right=self.dual_preview
+        button.setVisible(self.book_focus and self.dual_mode and self.book_mode and not self.closing and
+                          right is not None and not right.closed)
+        if button.isHidden():return
+        view=right.view;viewport=view.viewport();visible=viewport.rect()
+        if not right.book_blank and view.item is not None:
+            page=view.mapFromScene(view.page_rect).boundingRect().intersected(visible)
+            if not page.isEmpty():visible=page
+        point=viewport.mapTo(self.content,QPoint(max(visible.left(),visible.right()-button.width()-5),
+                                               max(visible.top(),min(visible.top()+6,visible.bottom()-button.height()+1))))
+        button.move(max(0,min(point.x(),self.content.width()-button.width())),
+                    max(0,min(point.y(),self.content.height()-button.height())))
+        style='QToolButton{background:'+('rgba(32,39,52,190);color:#b9c5d6;border:1px solid #596577;' if self.dark else 'rgba(228,232,238,205);color:#536273;border:1px solid #9ba5b2;')+\
+              'border-radius:4px;padding:0;} QToolButton:hover{background:'+('#3b4657' if self.dark else '#d2dae5')+';}'
+        if button.styleSheet()!=style:button.setStyleSheet(style)
+        button.sync_hover()
+        button.raise_()
+
+    def set_book_focus(self,enabled):
+        enabled=bool(enabled)
+        if enabled:
+            primary=self.preview_dialog
+            if (not self.dual_mode or not self.book_mode or self.dual_anim_timer.isActive() or
+                    self.thumbnail_host.picker_open or self.page_number_session is not None or
+                    primary is None or primary.closed or primary.busy):return
+            if primary.has_pending_move():
+                primary.after_move=lambda:self.set_book_focus(True);primary.commit_move();return
+            if primary.finish_text_edit(lambda:self.set_book_focus(True)):return
+            primary.set_mode('pan')
+        if enabled==self.book_focus:return
+        self.book_focus=enabled
+        self.preview_header.setVisible(not enabled);self.thumbnail_host.header.setVisible(not enabled)
+        self.actions.setVisible(not enabled);self.thumbnail_rail.sync();self.book_gap_handle.place();self.reading_footer.sync()
+        for editor in (self.preview_dialog,self.dual_preview):
+            if editor is not None and not editor.closed:
+                editor.update_text_controls();editor.update_navigation()
+        self.thumbnail_host.sync_modes();self.place_actions()
+        if self.preview_dialog is not None and not self.preview_dialog.closed:self.preview_dialog.view.setFocus()
 
     def resizeEvent(self,event):
         super().resizeEvent(event)
+        if (hasattr(self,'book_gap_handle') and self.dual_mode and self.book_mode and
+                not self.dual_anim_timer.isActive()):
+            if self.splitter.handleWidth()!=2:self.splitter.setHandleWidth(2)
         # 접힌 썸네일에는 resizeEvent가 오지 않으므로 주 창에서도 위치를 갱신한다.
         self.place_actions()
 
@@ -13560,6 +15160,7 @@ class Window(QMainWindow):
         self.activateWindow();self.focus_content()
 
     def toggle_thumbnail_panel(self):
+        if self.book_focus:self.set_book_focus(False)
         if self.dual_mode:
             if self.dual_anim_timer.isActive():return
             opened=not self.thumbnail_host.picker_open
@@ -13579,9 +15180,15 @@ class Window(QMainWindow):
         self.thumbnail_rail.sync();self.place_actions();self.prioritize_thumbnails()
 
     def update_action_states(self):
-        if hasattr(self,'canvas'):self.canvas.setEnabled(bool(self.pages) and not self.clear_pending)
+        batch_busy=getattr(self,'page_batch_job',None) is not None
+        if hasattr(self,'canvas'):self.canvas.setEnabled(bool(self.pages) and not self.clear_pending and not batch_busy)
+        if hasattr(self,'thumbnail_host'):
+            can_number=bool(self.canvas.selected) and not self.clear_pending and not batch_busy and not self.page_number_session
+            self.thumbnail_host.number_toggle.setEnabled(bool(self.pages) and not self.clear_pending and not batch_busy)
+            self.thumbnail_host.number_button.setEnabled(can_number)
+            self.thumbnail_host.number_delete_button.setEnabled(bool(self.pages) and not self.clear_pending and not batch_busy)
         if hasattr(self,'save_button'):
-            loading=bool(self.pending_import or self.imports or self.import_cancelling)
+            loading=bool(self.pending_import or self.imports or self.import_cancelling or batch_busy)
             can_clear=bool(self.pages or self.history or loading) and not self.clear_pending
             self.clear_button.setEnabled(can_clear)
             self.save_button.setEnabled(bool(self.pages) and not loading)
@@ -13607,6 +15214,104 @@ class Window(QMainWindow):
                 editor.actions.translate_button.setToolTip(translation_tip)
                 editor.end_overlay.sync()
 
+    def update_preview_zoom(self,editor=None):
+        editor=editor or self.preview_dialog
+        if editor is None or editor.closed:
+            self.preview_header.setText('—');return
+        if editor is not self.preview_dialog or editor.dual_secondary:return
+        percent=round(100*editor.view.transform().m11()/max(.001,editor.view.fit_scale))
+        session=self.page_number_session
+        self.preview_header.setText(('페이지 번호 위치설정중입니다 · ' if session is not None and session.active else '')+f'{percent}%')
+
+    def prepare_page_action(self,callback):
+        if self.closing or self.clear_pending or self.page_batch_job is not None:return False
+        if self.pending_import or self.imports or self.import_cancelling:return False
+        editor=self.preview_dialog
+        if editor is not None and not editor.closed:
+            if editor.finish_text_edit(callback):return False
+            if editor.has_pending_move():editor.after_move=callback;editor.commit_move();return False
+            if editor.busy or editor.format_commit is not None or editor.paste_queue:
+                QTimer.singleShot(120,callback);return False
+        return True
+
+    def start_page_numbers(self):
+        if self.page_number_session is not None:return
+        if not self.prepare_page_action(self.start_page_numbers):return
+        targets=self.canvas.selected_pages_in_order()
+        if not targets:return
+        if any(p.is_document_card or p.is_text_document for p in targets):
+            QMessageBox.information(self,'쪽번호','PDF 카드의 전체 문서를 연 뒤 PDF 페이지를 선택하세요.');return
+        if self.dual_mode:self.close_dual_mode(animate=False)
+        self.thumbnails_collapsed=False;self.open_combined_view()
+        editor=self.preview_dialog
+        if editor is None or editor.closed:return
+        editor.nav_timer.stop();editor.nav_target_uid=None;editor.set_mode('pan');editor.sync_page(targets[0])
+        try:options=page_number_options(json.loads(self.settings.value('page_numbers/options','{}',type=str)))
+        except (ValueError,TypeError):options=page_number_options()
+        self.page_number_session=PageNumberSession(self,editor,targets,options)
+        editor.request_info();self.update_preview_zoom(editor);self.update_action_states()
+
+    def rotate_selected_pages(self,turn):
+        if self.page_number_session is not None:return
+        if not self.prepare_page_action(lambda:self.rotate_selected_pages(turn)):return
+        targets=self.canvas.selected_pages()
+        if not targets:return
+        if any(p.is_document_card or p.is_text_document for p in targets):return
+        self.start_page_batch('rotate',targets,turn=turn)
+
+    def delete_page_numbers(self):
+        if not self.prepare_page_action(self.delete_page_numbers):return
+        if self.page_number_session is not None:self.page_number_session.close()
+        targets=[p for p in self.pages if not p.is_text_document]
+        if targets:self.start_page_batch('delete_page_numbers',targets)
+
+    def start_page_batch(self,kind,targets,**values):
+        if self.page_batch_job is not None or self.closing or self.clear_pending:return
+        current=[self.by_id.get(p.uid) for p in targets]
+        if not current or any(p is None for p in current):
+            QMessageBox.warning(self,'페이지 변경','선택한 페이지가 변경되었습니다. 다시 선택하세요.');return
+        editors=[e for e in (self.preview_dialog,self.dual_preview) if e is not None and not e.closed]
+        if any(e.busy for e in editors):return
+        self.page_batch_serial+=1
+        entries=[{'uid':p.uid,'path':p.path,'number':p.number,'document_pages':p.document_pages,
+            'output':str(TEMP_ROOT/self.session/'edits'/(uuid.uuid4().hex+'.pdf'))} for p in current]
+        self.page_batch_job={'token':self.page_batch_serial,'kind':kind,'entries':entries,'editors':editors}
+        for editor in editors:editor.busy=True
+        if self.page_number_session is not None:self.page_number_session.set_busy(True)
+        self.update_action_states()
+        self.page_batch_backend.request('page_batch','',token=self.page_batch_serial,priority=True,
+            payload={'kind':kind,'entries':entries,**values})
+
+    def got_page_batch(self,token,result,error):
+        job=self.page_batch_job
+        if job is None or token!=job['token']:return
+        replacements=result.get('replacements',[]) if not error else []
+        for entry in job['entries']:
+            current=self.by_id.get(entry['uid'])
+            if current is None or (current.path,current.number,current.document_pages)!=(entry['path'],entry['number'],entry['document_pages']):
+                error=error or '처리 중 페이지가 변경되어 적용을 취소했습니다.'
+        self.page_batch_job=None
+        for editor in job['editors']:
+            if not editor.closed:editor.busy=False
+        session=self.page_number_session
+        if session is not None:session.set_busy(False)
+        if error:
+            for entry in job['entries']:Path(entry['output']).unlink(missing_ok=True)
+            self.update_action_states();QMessageBox.warning(self,'페이지 변경 실패',error);return
+        if job['kind']=='page_numbers' and session is not None:
+            self.canvas.selected={p.uid for p in session.targets}
+            self.canvas.selection_order=[p.uid for p in session.targets];session.close()
+        if replacements:
+            outputs={p['uid']:p['path'] for p in replacements};self.snapshot()
+            self.pages=[PageRef(outputs[p.uid],0,p.uid,p.label_path,p.label_number,p.input_path,
+                p.document_pages,dict(p.text_info),p.comparison_group) if p.uid in outputs else p for p in self.pages]
+            self.refresh()
+        else:self.update_action_states()
+        if job['kind']=='delete_page_numbers':
+            text=f'더뷰어 쪽번호 {result.get("count",0)}개 삭제' if replacements else '더뷰어가 추가한 쪽번호가 없습니다.'
+            QToolTip.showText(QCursor.pos(),text,self.canvas)
+
+
     def snapshot(self):
         self.history.append(PageState(self.pages,self.original_path))
         self.history = self.history[-30:]
@@ -13614,13 +15319,14 @@ class Window(QMainWindow):
 
     def refresh(self):
         self.update_action_states()
-        self.canvas.setEnabled(bool(self.pages) and not self.clear_pending)
+        self.canvas.setEnabled(bool(self.pages) and not self.clear_pending and self.page_batch_job is None)
         self.by_id = {p.uid:p for p in self.pages}
+        if self.pages and (self.preview_dialog is None or self.preview_dialog.closed):
+            self.reading_renderer.expect_open()
         self.canvas.selected.intersection_update(self.by_id)
         self.canvas.positions = {k:v for k,v in self.canvas.positions.items() if k in self.by_id}
         self.canvas.velocities = {k:v for k,v in self.canvas.velocities.items() if k in self.by_id}
         self.canvas.layout_pages()
-        self.prioritize_thumbnails()
         if self.preview_dialog is not None and not self.preview_dialog.closed:
             page = self.by_id.get(self.preview_dialog.page.uid)
             if page is None and self.preview_dialog.embedded and self.pages:
@@ -13644,6 +15350,8 @@ class Window(QMainWindow):
             self.close_dual_mode(animate=False)
             self.restore_empty_preview()
             self.setWindowTitle(APP_NAME+(f' · {Path(self.browse_path).name}' if self.browse_path else ''))
+        self.prioritize_thumbnails()
+        self.reading_renderer.schedule()
 
     def replace_page(self, old, path):
         if old.is_document_card:
@@ -13939,6 +15647,7 @@ class Window(QMainWindow):
                 bar.setValue(int(max(0,point.y()-24)))
 
     def follow_thumbnail_selection(self):
+        if self.page_number_session is not None:return
         selecting_right=bool(self.dual_mode and self.thumbnail_host.picker_open)
         editor=self.dual_preview if selecting_right else self.preview_dialog
         if editor is None or editor.closed or not editor.embedded:return
@@ -13980,6 +15689,7 @@ class Window(QMainWindow):
         self.canvas.layout_pages();self.place_actions();self.focus_content()
 
     def restore_empty_preview(self):
+        self.update_preview_zoom()
         if self.preview_dialog is not None and not self.preview_dialog.closed:return
         if self.dual_mode:self.close_dual_mode(animate=False)
         if self.preview_splitter.indexOf(self.empty_preview)<0:
@@ -14019,6 +15729,7 @@ class Window(QMainWindow):
         self.dual_handle.sync();self.thumbnail_rail.sync();secondary.view.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def close_dual_mode(self,animate=True):
+        if self.book_focus:self.set_book_focus(False)
         if not self.dual_mode and self.dual_preview is None:return
         self.dual_import_batch=None;self.dual_render_target=None
         self.comparison.close_dual()
@@ -14035,7 +15746,7 @@ class Window(QMainWindow):
         t=min(1.,max(0.,time.monotonic()-self.dual_anim_started)/.48);ease=1-(1-t)**3
         target=0. if self.dual_anim_closing else 1.
         self.dual_progress=self._dual_start_progress+(target-self._dual_start_progress)*ease
-        self.splitter.setHandleWidth(round(5+(5 if self.book_mode else 79)*self.dual_progress))
+        self.splitter.setHandleWidth(2 if self.book_mode else round(5+(84-5)*self.dual_progress))
         self.compare_divider.set_progress(self.dual_progress);self.thumbnail_host.set_progress(self.dual_progress)
         self.splitter.setSizes([round(a+(b-a)*ease) for a,b in zip(self.dual_anim_from,self.dual_anim_to)])
         self.place_actions();self.position_book_controls()
@@ -14046,7 +15757,7 @@ class Window(QMainWindow):
 
     def _finish_dual_open(self):
         self.dual_anim_timer.stop();self.dual_anim_closing=False;self.dual_progress=1.
-        self.splitter.setHandleWidth(10 if self.book_mode else 84)
+        self.splitter.setHandleWidth(2 if self.book_mode else 84)
         self.compare_divider.set_progress(1.);self.thumbnail_host.set_progress(1.)
         self.splitter.setSizes(self.dual_anim_to);self.dual_split_sizes=self.splitter.sizes()
         self.comparison.fit_pair();self.dual_handle.sync();self.place_actions();self.position_book_controls()
@@ -14085,6 +15796,7 @@ class Window(QMainWindow):
         self.thumbnail_host.picker.setVisible(self.dual_mode and not self.book_mode)
 
     def set_dual_kind(self,kind):
+        if kind!='book' and self.book_focus:self.set_book_focus(False)
         self.dual_kind=kind if kind in ('review','book') else 'review'
         self.thumbnail_host.sync_modes()
         if not self.dual_mode:return
@@ -14096,11 +15808,28 @@ class Window(QMainWindow):
         for editor in (self.preview_dialog,self.dual_preview):
             editor.view.set_registration();editor.book_blank=False;editor.book_turn.stop();editor.position_controls()
         self.thumbnail_host.set_picker(False);self.compare_divider.set_progress(self.dual_progress)
-        self.splitter.setHandleWidth(10 if requested else 84)
+        self.splitter.setHandleWidth(2 if requested else 84)
         if requested:self.show_book_spread(self.preview_dialog.page)
         else:self.comparison.rebase();self.comparison.invalidate()
         self.comparison.update_bars();self.sync_dual_kind()
         for editor in (self.preview_dialog,self.dual_preview):editor.update_navigation()
+        self.place_actions()
+
+    def book_gap_limit(self):
+        minimum=max(200,self.preview_host.minimumSizeHint().width())+max(200,self.thumbnail_host.minimumSizeHint().width())
+        limit=max(0,min(240,self.splitter.width()-minimum-16))
+        for editor in (self.preview_dialog,self.dual_preview):
+            if editor is not None and not editor.closed:
+                limit=min(limit,max(0,2*(editor.view.width()-160)))
+        return limit
+
+    def book_gap_width(self):return min(self.book_gap,self.book_gap_limit())
+
+    def set_book_gap(self,gap,persist=False):
+        self.book_gap=max(0,min(240,int(gap)))
+        if self.dual_mode and self.book_mode:
+            self.place_actions()
+        if persist:self.settings.setValue('book/image_gap',self.book_gap)
 
     def set_book_step(self,step):
         self.book_step=int(step)
@@ -14240,11 +15969,38 @@ class Window(QMainWindow):
         self.text_options=options;self.settings.setValue('text/options',json.dumps(options))
         self.refresh_text_source(page,options=options)
 
+    def apply_open_layout(self):
+        uid=self.pending_open_layout
+        if uid is None or self.closing or self.clear_pending:return
+        if getattr(self,'review_initializing',False):self.pending_open_layout=None;return
+        page=self.by_id.get(uid)
+        if page is None:self.pending_open_layout=None;return
+        editor=self.preview_dialog
+        if editor is None or editor.closed:
+            self.open_combined_view();editor=self.preview_dialog
+        if editor is None or editor.closed:return
+        # A user who moved away while the import was running keeps their chosen view.
+        if editor.page.uid!=uid:self.pending_open_layout=None;return
+        extension=Path(page.input_path or page.source_path or page.label_path).suffix.lower()
+        source_editor=page.is_text_document and extension in ('.py','.pyw','.html','.htm')
+        if source_editor and (self.pending_import or self.imports or self.import_cancelling):return
+        if source_editor and QApplication.activeModalWidget() is not None:
+            self.open_layout_timer.start(100);return
+        self.pending_open_layout=None
+        if extension in ARCHIVE_EXTENSIONS and not page.is_document_card:
+            if not self.dual_mode:self.open_dual_mode('book')
+            elif not self.book_mode:self.set_dual_kind('book')
+        else:
+            if self.dual_mode:self.close_dual_mode(animate=False)
+            if self.thumbnails_collapsed:self.toggle_thumbnail_panel()
+            if source_editor:self.edit_text_source(page)
+
     def auto_text_book(self):
         if self.closing or self.clear_pending or self.pending_import or self.imports or getattr(self,'review_initializing',False):return
         editor=self.preview_dialog
         if editor is None or editor.closed:return
         if editor.page.is_text_document and not editor.page.is_document_card:
+            if Path(editor.page.source_path).suffix.lower() in ('.py','.pyw','.html','.htm'):return
             source=editor.page.source_path
             if source in self.autobook_seen_sources:return
             self.autobook_seen_sources.add(source)
@@ -14322,6 +16078,7 @@ class Window(QMainWindow):
         if not paths:return
         initial=not self.pages and not self.pending_import and not self.imports
         if initial:
+            self.book_drop_pending=False
             self.browse_path=paths[0]
             self.browse_books=navigation_books
             self.browse_containers=(bool(navigation_mode) if navigation_mode is not None else
@@ -14377,7 +16134,7 @@ class Window(QMainWindow):
             self.import_progress.finish(len(self.pages),errors=self.last_import_errors,
                                         unit='항목' if any(p.is_document_card for p in self.pages) else '쪽')
             self.last_import_errors=0
-            QTimer.singleShot(0,self.apply_live_text_style);QTimer.singleShot(0,self.auto_text_book)
+            QTimer.singleShot(0,self.apply_live_text_style);self.open_layout_timer.start(0);QTimer.singleShot(0,self.auto_text_book)
             if not self.dual_mode and self.book_drop_pending and self.pages:
                 self.book_drop_pending=False
                 QTimer.singleShot(0,lambda:self.open_dual_mode('book') if not self.pending_import and not self.imports else None)
@@ -14406,7 +16163,10 @@ class Window(QMainWindow):
         if batch.get('select'):
             batch['selected_ids'].extend(p.uid for p in added)
             self.canvas.selected=set(batch['selected_ids']);self.canvas.anchor=added[-1].uid
+        if batch.get('initial') and self.pending_open_layout is None and len(self.pages)==len(added):
+            self.pending_open_layout=added[0].uid
         self.refresh()
+        if self.pending_open_layout is not None:self.open_layout_timer.start(0)
         target=batch.get('preview_target')
         if (self.dual_import_batch is batch and target is self.dual_preview and target is not None
                 and not target.closed and not batch.get('preview_applied')):
@@ -14471,6 +16231,7 @@ class Window(QMainWindow):
     def cancel_import(self):
         if self.import_cancelling:return
         if not self.pending_import and not self.imports:return
+        self.open_layout_timer.stop();self.pending_open_layout=None
         token=self.pending_import[0] if self.pending_import else self.import_token
         for batch in self.imports:
             if batch.get('initial'):self.clean_page_orders.add(tuple(batch['opened_order']))
@@ -14595,8 +16356,8 @@ class Window(QMainWindow):
         if error:self.thumb_errors[key] = error
         else:
             self.thumbs[key] = pix;self.thumbs.move_to_end(key)
-            editor=self.preview_dialog
-            if editor is not None:editor.show_thumbnail(path,number,pix)
+            for editor in (self.preview_dialog,self.dual_preview):
+                if editor is not None:editor.show_thumbnail(path,number,pix)
             total=sum(p.width()*p.height()*4 for p in self.thumbs.values())
             while total>64*1024*1024 and len(self.thumbs)>1:
                 visible=getattr(self,'visible_thumb_keys',set())
@@ -14646,7 +16407,11 @@ class Window(QMainWindow):
         self.clear_pending=False;self.clear_timer.stop();self.update_action_states()
 
     def clear(self,*,replacing=False):
+        if self.page_batch_job is not None:
+            QTimer.singleShot(120,lambda:self.clear(replacing=replacing));return
+        if self.page_number_session is not None:self.page_number_session.close()
         if self.clear_pending:return
+        self.open_layout_timer.stop();self.pending_open_layout=None
         if not replacing:self.book_drop_pending=False
         if not replacing:self.replacement_paths=None;self.replacement_navigation_mode=None;self.replacement_books=None
         self.navigation_token+=1;self.navigation_request=None;self.navigation_backend.jobs.clear()
@@ -14709,6 +16474,7 @@ class Window(QMainWindow):
         self.large_thumbs_requested.clear()
         self.backend.jobs.clear();self.requested.clear();self.thumbs.clear();self.thumb_errors.clear()
         self.image_backend.cancel_pending(release=True)
+        self.reading_renderer.reset()
         self.clear_pending=False
         self.import_progress.dismiss()
         self.refresh()
@@ -15216,6 +16982,7 @@ class Window(QMainWindow):
 
     def set_image_engine(self,mode):
         if mode not in ('auto','qt','pillow') or mode==self.image_engine:return
+        self.reading_renderer.cancel_prefetch();self.reading_renderer.cache.clear()
         self.image_engine=mode;self.settings.setValue('image_engine',mode)
         self.image_backend.engine_mode=mode;self.image_backend.reset()
         self.preview_image_backend.engine_mode=mode;self.preview_image_backend.reset()
@@ -15225,10 +16992,12 @@ class Window(QMainWindow):
         self.large_thumbs_requested={k for k in self.large_thumbs_requested if not is_image_source(k[0])}
         self.thumb_errors={k:v for k,v in self.thumb_errors.items() if not is_image_source(k[0])}
         self.prioritize_thumbnails();self.canvas.viewport().update()
-        editor=self.preview_dialog
-        if editor is not None and not editor.closed:
+        for editor in (self.preview_dialog,self.dual_preview):
+            if editor is None or editor.closed:continue
             if is_image_source(editor.page.path):
+                editor.image_backend.engine_mode=mode
                 editor.token=self.next_preview_token();editor.requested_side=0;editor.request_image()
+        self.reading_renderer.schedule()
 
     def show_donation(self, parent=None):
         """제공받은 QR 원본을 내장해 별도 파일 없이 표시한다."""
@@ -15336,11 +17105,13 @@ class Window(QMainWindow):
             link.clicked.connect(lambda _checked=False,cb=callback:cb());footer.addWidget(link)
         donation=QPushButton('도네이션');donation.setObjectName('donation_button')
         donation.setToolTip('후원 QR 보기')
-        donation.setStyleSheet('QPushButton{color:#80848b;background:transparent;border:1px solid #aeb2b9;'
-            'border-radius:5px;padding:5px 11px;font-size:11px;}'
-            'QPushButton:hover{color:#646970;border-color:#858b94;background:rgba(128,132,139,15);}'
-            'QPushButton:pressed{background:rgba(128,132,139,30);}'
-            'QPushButton:focus{border-color:#858b94;}')
+        donation.setIcon(donation_coffee_icon());donation.setIconSize(QSize(24,24))
+        donation.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        donation.setStyleSheet('QPushButton{color:#ffffff;background:#246ad3;border:1px solid #4b91f0;'
+            'border-radius:6px;padding:6px 12px;font-size:13px;font-weight:700;}'
+            'QPushButton:hover{background:#347de5;border-color:#8bc0ff;}'
+            'QPushButton:pressed{background:#1853af;}'
+            'QPushButton:focus{border:2px solid #b4d9ff;}')
         donation.clicked.connect(lambda _checked=False:self.show_donation(dialog));footer.addWidget(donation)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.button(QDialogButtonBox.StandardButton.Close).setText('닫기')
@@ -15350,9 +17121,10 @@ class Window(QMainWindow):
             self.dark = dark.isChecked();self.show_numbers = numbers.isChecked()
             self.rename_after = rename.isChecked();self.separate = bool(mode.currentIndex())
             self.canvas.layout_pages();self.empty_preview.update();self.thumbnail_rail.sync()
+            self.place_actions()
             self.import_progress.place()
-            if self.preview_dialog is not None and not self.preview_dialog.closed:
-                self.preview_dialog.view.setBackgroundBrush(QColor('#181b24' if self.dark else '#edf0f5'))
+            for editor in (self.preview_dialog,self.dual_preview):
+                if editor is not None and not editor.closed:editor.view.setBackgroundBrush(editor.reading_background())
         for control in (size,force):control.valueChanged.connect(apply)
         for control in (animation,dark,numbers,rename):control.toggled.connect(apply)
         mode.currentIndexChanged.connect(apply)
@@ -15395,6 +17167,9 @@ class Window(QMainWindow):
     install_downloaded_update=tv_window_install_update
 
     def closeEvent(self,event):
+        if self.page_batch_job is not None:
+            QTimer.singleShot(120,self.close);event.ignore();return
+        if self.page_number_session is not None:self.page_number_session.close()
         if self.update_thread is not None and self.update_thread.isRunning():
             self._update_close_requested=True;self.update_thread.requestInterruption()
             QTimer.singleShot(120,self.close);event.ignore();return
@@ -15424,6 +17199,7 @@ class Window(QMainWindow):
                 event.ignore(); return
         self.text_style_timer.stop();self.pending_text_style=None
         self.closing=True;self.replacement_paths=None;self.navigation_request=None
+        self.reading_renderer.stop()
         if self.update_dialog is not None:self.update_dialog.close()
         self.import_progress.dismiss()
         self.conversion_overlay.dismiss()
@@ -15431,7 +17207,7 @@ class Window(QMainWindow):
         if self.preview_dialog is not None:
             self.preview_dialog.close()
         self.clear_timer.stop();self.clear_pending=False
-        self.save_settings();self.document_backend.stop();self.vector_backend.stop();self.input_backend.stop();self.backend.stop();self.image_backend.stop();self.preview_image_backend.stop();self.navigation_backend.stop()
+        self.save_settings();self.document_backend.stop();self.vector_backend.stop();self.input_backend.stop();self.backend.stop();self.image_backend.stop();self.preview_image_backend.stop();self.navigation_backend.stop();self.page_batch_backend.stop()
         self.cleanup_working_files(closing=True)
         self.cleanup_translation_review_input(self.translation_job or {})
         super().closeEvent(event)
