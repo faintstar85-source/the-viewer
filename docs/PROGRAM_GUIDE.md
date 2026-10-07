@@ -1,6 +1,6 @@
 # The Viewer 사용 안내
 
-**문서 기준: v3.13.30.** [다운로드](https://github.com/faintstar85-source/the-viewer/releases/latest) · [처음 화면으로](../README.md)
+**문서 기준: v3.13.38.** [다운로드](https://github.com/faintstar85-source/the-viewer/releases/latest) · [처음 화면으로](../README.md)
 
 ## 파일 열기와 페이지 정리
 
@@ -36,6 +36,12 @@
 | Office·한글·DXF·PSD 열기 | [지원 형식과 변환](FORMATS_AND_CONVERSION.md) |
 | PDF 번역·한글 변환·인쇄 | [지원 형식과 변환](FORMATS_AND_CONVERSION.md) |
 | 설치 EXE 만들기·GitHub 업로드 | [제작자 안내](BUILD_AND_GITHUB.md) |
+
+## PDF 문자 검색
+
+PDF를 연 뒤 **Ctrl+F**를 누릅니다. 검색어 입력 후 Enter 또는 **검색**을 누르면 현재 문서 범위의 검색 결과가 표시됩니다. 결과를 선택해 해당 페이지·위치로 이동하고, **검색 전 위치**로 돌아갑니다. 검색창에서 Esc 또는 ×를 누르면 패널을 닫습니다.
+
+PDF에 문자 정보가 있어야 하며, 이미지뿐인 스캔 PDF의 문자를 OCR로 인식하는 기능은 아닙니다. 문서가 바뀌면 다시 검색합니다.
 
 ## PDF 편집 시작
 

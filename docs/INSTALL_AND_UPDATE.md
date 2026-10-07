@@ -29,5 +29,5 @@
 
 **compliance**는 제작용 배포 패키지에 포함된 라이선스·대응 소스 자료 폴더입니다. 패키징할 뷰어 PY와 같은 폴더에 전체 자료를 둡니다. 일반 사용자가 설치 EXE로 실행할 때 직접 이 폴더를 준비하는 절차는 없습니다.
 
-기능 기준: v3.13.30 [뷰어 소스](../pdf_page_dragger.py)와 TheViewer_Build_Standalone_v1.5.6의 설치 코드.
+기능 기준: v3.13.38 [뷰어 소스](../pdf_page_dragger.py)와 TheViewer_Build_Standalone_v1.5.8의 설치 코드.
 

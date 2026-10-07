@@ -6,12 +6,17 @@ Windows용 PDF·사진 뷰어입니다. 여러 자료의 페이지를 정리하�
 
 ## 문서 기준
 
-이 안내는 **The Viewer v3.13.30 소스**를 기준으로 작성했습니다. 실제 공개된 설치 파일과 배포 버전은 [GitHub Releases](https://github.com/faintstar85-source/the-viewer/releases)에서 확인하세요.
+이 안내는 **The Viewer v3.13.38 소스**를 기준으로 작성했습니다. 실제 공개된 설치 파일과 배포 버전은 [GitHub Releases](https://github.com/faintstar85-source/the-viewer/releases)에서 확인하세요.
 
 일반 사용자는 릴리스에 첨부된 설치 EXE를 사용합니다. 설치 배포본은 Python을 별도로 설치하지 않고 실행할 수 있습니다.
 
 ## 최근 반영한 기능
 
+- Ctrl+F로 PDF 문자를 검색하고, 결과 위치로 이동하거나 검색 전 위치로 돌아갑니다.
+
+- PDF 읽기를 GUI·편집 초기화보다 먼저 시작하고 원본을 직접 표시합니다. 양식 페이지는 기존 경로로 전환합니다. [읽기 구조와 확인 범위](docs/READING_SPEED.md).
+- PDF 화면 전달의 PNG 압축·해제를 줄이고, 읽은 화면으로 썸네일을 만듭니다. [읽기 구조](docs/READING_SPEED.md).
+- 최근 페이지 캐시를 최대 8쪽·64MiB로 유지해 앞뒤 이동에 재사용합니다.
 - 우클릭 드래그 범위에 일부만 걸친 글자·그림·표선을 선택합니다. 얇은 선에는 화면 기준 약 3px의 선택 여유를 둡니다.
 - 여러 얇은 채움 사각형을 한 경로로 묶어 저장한 PDF 표선도 편집 대상으로 읽습니다.
 - 글자와 표선을 함께 옮길 때 PDF 재기록의 미세한 좌표 반올림 때문에 선 연결이 끊기는 오류를 수정했습니다.
@@ -99,7 +104,7 @@ ZIP 배포본은 압축을 풀고 동봉 파일을 함께 유지합니다. 소�
 | Office 문서 | `.doc` `.docx` `.xls` `.xlsx` `.ppt` `.pptx` 등 | LibreOffice로 PDF 변환 후 보기 |
 | CAD·디자인 | `.dxf` `.psd` | 형식별 PDF 변환 후 보기 |
 
-v3.13.30 소스에는 **DWG·AI·EPS·PS 직접 읽기**가 포함되어 있지 않습니다. 해당 문서는 원래 프로그램에서 PDF로 저장해 열어 주세요. GIF의 PDF 저장·인쇄는 첫 프레임을 사용합니다.
+v3.13.38 소스에는 **DWG·AI·EPS·PS 직접 읽기**가 포함되어 있지 않습니다. 해당 문서는 원래 프로그램에서 PDF로 저장해 열어 주세요. GIF의 PDF 저장·인쇄는 첫 프레임을 사용합니다.
 
 ## 라이선스
 
@@ -109,5 +114,5 @@ v3.13.30 소스에는 **DWG·AI·EPS·PS 직접 읽기**가 포함되어 있지 
 
 - [프로그램 사용 안내](docs/PROGRAM_GUIDE.md)
 - [수정 기록](CHANGELOG.md)
-- [v3.13.30 릴리스 설명](releases/RELEASE_NOTES_v3.13.30.md)
+- [v3.13.38 릴리스 설명](releases/RELEASE_NOTES_v3.13.38.md)
 - [뷰어 소스](pdf_page_dragger.py)
