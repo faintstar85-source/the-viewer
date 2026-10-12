@@ -1,57 +1,47 @@
-# 패키징과 GitHub 업데이트 — v3.13.38
+# 패키징과 GitHub 업데이트 — v3.13.39
 
 [사용 안내](PROGRAM_GUIDE.md) · [업로드 순서](../UPLOAD_GUIDE.md)
 
-## 1. Windows 설치 EXE 만들기
+## Windows 빌드
 
-파일: **TheViewer_Build_Standalone_v1.5.9.py**
+보완된 제작 묶음은 `TheViewer_v3.13.39_Build_Complete.zip`입니다. 전체 압축을 풀고 `START_BUILD.py`를 실행하면 뷰어 소스와 동봉된 compliance 경로를 지정해 패키징 v1.5.9를 엽니다.
 
-1. 패키징 PY를 실행하고 첨부받은 `The_Viewer_v3.13.38(2).py`를 선택합니다. `(2)`가 붙어 있어도 내부 버전을 읽으므로 이름을 바꿀 필요가 없습니다.
-2. 아이콘을 바꿀 경우 **ICO 선택**에서 지정합니다. 비워두면 선택한 뷰어의 내장 아이콘을 사용합니다.
-3. 기존 패키징 자료의 **compliance 폴더 전체**를 지정합니다. 이 폴더는 단독 PY 안에 포함되어 있지 않습니다.
-4. 설치 파일을 만들 경우 **설치 EXE도 만들기**를 켜고 Inno Setup의 **ISCC.exe**를 선택합니다.
-5. **패키징 시작**을 누릅니다. 소스·EXE·최종 폴더 실행 검사를 통과하면 결과가 생성됩니다.
+1. 선택된 소스가 `The_Viewer_v3.13.39.py`인지 확인합니다.
+2. 아이콘을 바꾸려면 빌드 전에 ICO 파일을 지정합니다.
+3. 설치 파일이 필요하면 **설치 EXE도 만들기**와 Inno Setup의 **ISCC.exe**를 지정합니다.
+4. **패키징 시작**을 누르고 결과와 진단 로그를 확인합니다.
 
-제작 PC는 x64 CPython 3.11~3.13과 tkinter를 사용하는 Windows 환경입니다. 의존성은 전용 가상환경에 설치하며 첫 준비에는 인터넷이 필요합니다. 설치 EXE 제작은 Inno Setup 6.4 이상 또는 7을 사용하는 기존 빌드 경로를 유지합니다.
+compliance에는 Qt/PySide6 6.11.1과 certifi의 라이선스·대응 소스가 들어 있습니다. PY만 따로 옮기거나 자료를 누락하면 자료 검사에서 중단될 수 있습니다. MD 문서 ZIP은 이 빌드 자료를 대신하지 않습니다.
 
-결과: `The_Viewer_Setup_3.13.38_x64.exe`, `The_Viewer_v3.13.38_windows_x64.zip`, `The_Viewer_v3.13.38.py`. 설치 EXE를 선택하지 않으면 앞의 설치 파일은 생성하지 않습니다.
+설치 EXE의 기본 파일명은 `The_Viewer_Setup_3.13.39_x64.exe`입니다. 설치 EXE 제작을 선택하지 않은 빌드에는 이 파일이 생성되지 않습니다.
 
-compliance는 기존과 동일하게 Qt/PySide6 6.11.1 및 certifi 대응 소스·라이선스 자료를 검사합니다. 임의로 빈 폴더를 만들면 통과하지 않습니다. Office 엔진은 기본 미동봉이며, LibreOffice 동봉을 선택한 경우 해당 엔진 자료도 필요합니다.
+## 문서·소스·릴리스 업로드
 
-## 2. 저장소 문서·소스·릴리스 업데이트
+`The_Viewer_GitHub_Manager_v2.1.2.py`를 실행합니다.
 
-파일: **The_Viewer_GitHub_Manager_v2.1.2.py**
-
-1. **로그인 · 설정**에서 Git·GitHub CLI와 `gh.exe`를 확인하고 브라우저로 로그인합니다.
+1. **로그인 · 설정**에서 필요한 도구와 GitHub 로그인을 확인합니다.
 2. 저장소가 `faintstar85-source/the-viewer`인지 확인합니다.
-3. **간편 업로드**에 아래 세 파일을 선택하거나 함께 드롭합니다.
-   - `TheViewer_GitHub_Markdown_v3.13.38.zip`
-   - 빌드한 `The_Viewer_Setup_3.13.38_x64.exe`
-   - 이번 빌드에서 만든 `The_Viewer_v3.13.38.py`
-4. **릴리스 설명 확인**으로 본문을 확인합니다.
-5. **업로드 시작 · 릴리스 공개**를 누르면 선택 저장소의 문서·소스를 반영하고 첨부파일을 확인한 뒤 공개합니다.
+3. **간편 업로드**에 다음 세 파일을 선택합니다.
+   - `TheViewer_GitHub_Markdown_v3.13.39.zip`
+   - `The_Viewer_Setup_3.13.39_x64.exe`
+   - 빌드에 사용한 `The_Viewer_v3.13.39.py`
+4. **릴리스 설명 확인**으로 본문과 버전을 확인합니다.
+5. **업로드 시작 · 릴리스 공개**를 누릅니다.
 
-MD ZIP에는 README.md, CHANGELOG.md, docs/, releases/가 들어 있습니다. 압축을 풀지 않고 매니저에 넣습니다. `TheViewer_GIT_Update_v3.13.38.md`는 릴리스 설명을 따로 읽거나 복사할 때 쓰는 단일 문서입니다.
+MD ZIP은 풀지 않고 선택합니다. README.md, CHANGELOG.md, UPLOAD_GUIDE.md, docs/, releases/의 문서가 저장소에 반영됩니다. 뷰어 PY는 `pdf_page_dragger.py`로 준비하며 원본 파일을 보존합니다. 설치 EXE·MD ZIP·뷰어 PY를 릴리스에 첨부합니다.
 
-매니저는 PY를 저장소의 `pdf_page_dragger.py`로 준비합니다. 원본을 수정하지 않고 업로드용 작업 사본에 저장소 주소를 반영합니다. 같은 폴더에 버전이 일치하는 뷰어 PY와 MD ZIP이 하나의 내용으로 확인되면 자동으로 선택합니다. 실행·선택만으로 업로드하지 않습니다.
+매니저 v2.1.2의 같은 폴더 자동 선택은 v3.13.38을 기준으로 합니다. 이번 파일들은 직접 선택하세요. 선택한 PY의 실제 버전과 v3.13.39 릴리스 문서가 일치하면 입력 검사 대상이 됩니다.
 
-패키징 PY 안의 **GitHub 업로드** 탭은 설치 EXE·실행 ZIP·PY 릴리스 첨부를 위한 기존 기능입니다. **README 등 저장소 문서까지 갱신할 때는 위 전용 매니저를 사용하세요.**
-
-## 3. 입력만 확인하기
+## 입력 검사
 
 ```bat
-py TheViewer_Build_Standalone_v1.5.9.py --check-payload
-py TheViewer_Build_Standalone_v1.5.9.py --check-source "The_Viewer_v3.13.38(2).py"
-py The_Viewer_GitHub_Manager_v2.1.2.py --check-inputs "The_Viewer_v3.13.38(2).py" "TheViewer_GitHub_Markdown_v3.13.38.zip"
+py The_Viewer_GitHub_Manager_v2.1.2.py --check-inputs "The_Viewer_v3.13.39.py" "TheViewer_GitHub_Markdown_v3.13.39.zip"
 ```
 
-위 명령은 입력 검사이며 GitHub에 업로드하지 않습니다. 매니저 GUI에는 PySide6가 필요합니다. 설치되어 있지 않으면 `py -m pip install PySide6`로 준비합니다. 패키징 도구 자체 화면에는 PySide6가 필요하지 않습니다.
+이 명령은 PY 문법, 소스 버전, MD ZIP 구성과 해당 버전 릴리스 문서를 검사합니다. GitHub 로그인·업로드는 하지 않으며 설치 EXE의 실행 검사를 대신하지 않습니다.
 
-## 확인 범위와 근거
+## 확인 범위
 
-Windows 설치 EXE 빌드·설치와 원격 GitHub 업로드는 이 전달 과정에서 수행하지 않았습니다. 실제 Windows 검사는 제작 PC에서 생성되는 Build_Result.json 및 검사 로그로 확인합니다. 빌드 시 설치되는 라이브러리 버전은 requirements_build.txt의 기존 고정값을 유지합니다.
+v3.13.39의 빌드 완료는 제작자가 전달했습니다. 이 문서 묶음을 준비하면서 Windows 설치·실행·탐색기 드래그를 새로 검사하거나 GitHub에 공개하지는 않았습니다. 해당 PC의 빌드 결과는 `Build_Result.json`과 로그로 확인합니다.
 
-- [PyInstaller 공식 사용 안내](https://pyinstaller.org/en/stable/usage.html)
-- [GitHub CLI 릴리스 생성](https://cli.github.com/manual/gh_release_create)
-- [GitHub CLI 릴리스 공개](https://cli.github.com/manual/gh_release_edit)
-- [뷰어 소스](../pdf_page_dragger.py)
+기준 자료: `The_Viewer_GitHub_Manager_v2.1.2.py`의 `check_local_inputs`, `quick_project`, `quick_publish`, `markdown_bundle` 및 [뷰어 소스](../pdf_page_dragger.py).
