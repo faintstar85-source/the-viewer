@@ -229,6 +229,8 @@ def probe_viewer(r:Runner,command:list[str],report:Path,cwd:Path,*,frozen:bool,e
     result=strict_report(report,nonce,frozen,code,expected,required_count)
     for row in result['checks']:
         r.emit(f"[검사 {row['status']}] {row['name']}")
+        if row['name'].startswith('Type3 '):
+            r.emit('[Type3 검증] '+json.dumps(row.get('details',{}),ensure_ascii=False,sort_keys=True))
     return result
 
 

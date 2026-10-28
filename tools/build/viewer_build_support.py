@@ -175,7 +175,7 @@ def run_checks(namespace, report_path, nonce):
         'viewer_version': namespace.get('APP_VERSION'),
         'python': sys.version.split()[0], 'platform': sys.platform,
         'frozen': bool(getattr(sys, 'frozen', False)), 'checks': [], 'versions': {},
-        'required_check_count': 14 + int('printing_package_selftest' in namespace) + int('vector_package_selftest' in namespace) + 2*int('document_package_selftest' in namespace) + int('bundled_engines_package_selftest' in namespace) + int('text_package_selftest' in namespace) + int('compare_page_pair' in namespace) + int('editing_ui_package_selftest' in namespace),
+        'required_check_count': 14 + int('printing_package_selftest' in namespace) + int('vector_package_selftest' in namespace) + 2*int('document_package_selftest' in namespace) + int('bundled_engines_package_selftest' in namespace) + int('text_package_selftest' in namespace) + int('compare_page_pair' in namespace) + int('editing_ui_package_selftest' in namespace) + int('type3_edit_package_selftest' in namespace),
         'scope': 'generated local samples; no DeepL API request or user settings access',
     }
 
@@ -322,6 +322,8 @@ def run_checks(namespace, report_path, nonce):
             return 'ReportLab 생성·pypdf 저장·PDFium 텍스트/렌더링·편집 정보 읽기'
 
         check('PDFium·pypdf·ReportLab 및 편집 모듈', pdf_sample)
+        if 'type3_edit_package_selftest' in namespace:
+            check('Type3 글자 이동·삭제·교체·원본 배치 보존',namespace['type3_edit_package_selftest'])
 
         def catalog():
             entries = []

@@ -144,7 +144,7 @@ def inspect_source(path: Path) -> dict:
         raise BuildError('APP_VERSION 값이 비어 있거나 파일명으로 사용할 수 없습니다.')
     return {'source': str(path), 'version': version, 'sha256': hashlib.sha256(raw).hexdigest(),
             'imports': sorted(imports), 'engine_profile': constants['ENGINE_PROFILE'],
-            'required_check_count': 14 + int('printing_package_selftest' in funcs) + int('vector_package_selftest' in funcs) + 2*int('document_package_selftest' in funcs) + int('bundled_engines_package_selftest' in funcs) + int('text_package_selftest' in funcs) + int('compare_page_pair' in funcs) + int('editing_ui_package_selftest' in funcs)}
+            'required_check_count': 14 + int('printing_package_selftest' in funcs) + int('vector_package_selftest' in funcs) + 2*int('document_package_selftest' in funcs) + int('bundled_engines_package_selftest' in funcs) + int('text_package_selftest' in funcs) + int('compare_page_pair' in funcs) + int('editing_ui_package_selftest' in funcs) + int('type3_edit_package_selftest' in funcs)}
 
 
 def inspect_ico(raw: bytes) -> dict:
