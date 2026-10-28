@@ -231,6 +231,8 @@ def probe_viewer(r:Runner,command:list[str],report:Path,cwd:Path,*,frozen:bool,e
         r.emit(f"[검사 {row['status']}] {row['name']}")
         if row['name'].startswith('Type3 '):
             r.emit('[Type3 검증] '+json.dumps(row.get('details',{}),ensure_ascii=False,sort_keys=True))
+        if row['name']=='짧은 숫자 선택·입력·원본 굵기':
+            r.emit('[숫자·굵기 검증] '+json.dumps(row.get('details',{}),ensure_ascii=False,sort_keys=True))
     return result
 
 

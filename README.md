@@ -6,7 +6,7 @@ Windows용 PDF·사진 뷰어입니다. 여러 자료의 페이지를 정리하�
 
 ## 문서 기준
 
-이 안내의 현재 소스 기준은 **The Viewer v3.13.43**입니다. 실제 공개된 설치 파일과 배포 버전은 [GitHub Releases](https://github.com/faintstar85-source/the-viewer/releases)에서 확인하세요.
+이 안내의 현재 소스 기준은 **The Viewer v3.13.44**입니다. 실제 공개된 설치 파일과 배포 버전은 [GitHub Releases](https://github.com/faintstar85-source/the-viewer/releases)에서 확인하세요.
 
 일반 사용자는 릴리스에 첨부된 설치 EXE를 사용합니다. 설치 배포본은 Python을 별도로 설치하지 않고 실행할 수 있습니다.
 
@@ -19,6 +19,14 @@ Windows용 PDF·사진 뷰어입니다. 여러 자료의 페이지를 정리하�
 - 사용자는 기존 **정 → 업데이트**에서 새 설치 파일을 확인합니다.
 
 [자동 빌드·배포 상태](https://github.com/faintstar85-source/the-viewer/actions/workflows/release.yml) · [제작자 안내](docs/BUILD_AND_GITHUB.md)
+
+## v3.13.44 변경사항
+
+- 작은 숫자의 선택 범위를 넓히고, 숫자·짧은 문구를 큰 입력칸에서 수정할 수 있게 했습니다. 더블클릭으로 전체 선택하고 Enter로 적용합니다.
+- 획 두께 추정값 때문에 보통 글씨가 굵게 설정되는 판단을 개선하고 실제 내장 글꼴의 굵기를 먼저 확인합니다.
+- Type3 편집 수정과 원본 보존 검사를 함께 유지합니다.
+
+[이번 버전 수정 내역](releases/RELEASE_NOTES_v3.13.44.md)
 
 ## v3.13.43 변경사항
 

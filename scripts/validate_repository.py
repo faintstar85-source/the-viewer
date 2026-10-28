@@ -24,6 +24,8 @@ def validate_backend_copies(source: str) -> None:
     compile(capsule,'PDF compatibility capsule','exec');inner=ast.parse(capsule)
     for name in ('_VIEWER_PDF_ENGINE_SOURCE','_VIEWER_PDF_EDIT_SOURCE'):
         compile(embedded(inner,name),name+':compat','exec')
+    if ast.dump(ast.parse(embedded(tree,'_VIEWER_PDF_ENGINE_SOURCE')),include_attributes=False)!=ast.dump(ast.parse(embedded(inner,'_VIEWER_PDF_ENGINE_SOURCE')),include_attributes=False):
+        raise ValueError('Main and independently bundled PDF reading/font-style backends differ')
     helpers={'_font_code_size','_font_width_table'}
     def functions(code):
         return {n.name:ast.dump(n,include_attributes=False) for n in ast.parse(code).body
