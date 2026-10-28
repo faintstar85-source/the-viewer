@@ -30,6 +30,8 @@ on:
 permissions:
   contents: read
 env:
+  PYTHONUTF8: '1'
+  PYTHONIOENCODING: utf-8
   INPUT_PUBLISH: ${{ github.event_name == 'workflow_dispatch' && toJSON(inputs.publish) || '' }}
 concurrency:
   group: viewer-release-${{ github.ref }}

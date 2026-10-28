@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / 'scripts'))
 import ci_common
 import prepare_compliance as compliance
 import publish_release as publisher
+import build_windows_release as windows_builder
 from build_common import BuildError, atomic_json
 from github_release import load_prepared_release, release_notes
 
@@ -67,6 +68,29 @@ class TestConfigAndCompliance(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             record=self.archive_record(b'x');record['source_url']='http://unapproved.invalid/source'
             with self.assertRaises(BuildError):compliance.download_source(Path(temp),record)
+
+
+class TestWindowsPrerequisites(unittest.TestCase):
+    def test_missing_korean_messages_use_verified_staged_compiler(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);installed=root/'installed';installed.mkdir()
+            compiler=installed/'ISCC.exe';compiler.write_bytes(b'compiler')
+            (installed/'Default.isl').write_bytes(b'default language')
+            with patch('installer_build.pe_machine',return_value=0x8664):
+                staged=windows_builder.prepare_installer_compiler(str(compiler),root/'staged')
+            self.assertEqual(staged,root/'staged'/'ISCC.exe')
+            self.assertEqual(staged.read_bytes(),b'compiler')
+            translation=(staged.parent/'Languages'/'Korean.isl').read_bytes()
+            self.assertTrue(translation.startswith(b'\xef\xbb\xbf'))
+            self.assertIn('LanguageName=한국어',translation.decode('utf-8-sig'))
+            self.assertFalse((installed/'Languages').exists())
+    def test_corrupt_fallback_translation_stops_before_copy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);compiler=root/'ISCC.exe';compiler.write_bytes(b'compiler')
+            with patch.object(windows_builder,'KOREAN_SHA256','0'*64):
+                with self.assertRaises(BuildError):
+                    windows_builder.prepare_installer_compiler(str(compiler),root/'staged')
+            self.assertFalse((root/'staged').exists())
 
 
 class FakeGitHub:

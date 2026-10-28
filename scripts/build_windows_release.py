@@ -1,6 +1,7 @@
 """Drive the existing checked Windows builder without its packaging GUI."""
 from __future__ import annotations
 import json
+import hashlib
 import os
 from pathlib import Path
 import shutil
@@ -9,9 +10,26 @@ import sys
 import uuid
 
 from ci_common import ROOT, BUILD_TOOLS, release_config, inside
-from build_common import BuildError, atomic_json, read_json
+from build_common import BuildError, atomic_json, read_json, clean_environment
 from github_release import prepare_release, verify_plan_files
-from installer_build import find_iscc
+from installer_build import find_iscc, inspect_iscc
+
+KOREAN_SHA256 = 'a9427833f1975fb13dcaa09bc38aa16eba07698ce9d9596575fdd3362f2646a1'
+
+
+def prepare_installer_compiler(compiler: str, destination: Path) -> Path:
+    """Supply the pinned upstream translation without altering the runner installation."""
+    compiler = Path(compiler).resolve()
+    if (compiler.parent / 'Languages' / 'Korean.isl').is_file():
+        return inspect_iscc(str(compiler))
+    translation = (BUILD_TOOLS / 'inno' / 'Korean.isl').read_bytes()
+    if hashlib.sha256(translation).hexdigest() != KOREAN_SHA256:
+        raise BuildError('The pinned Korean installer translation has changed')
+    shutil.copytree(compiler.parent, destination)
+    languages = destination / 'Languages'; languages.mkdir(exist_ok=True)
+    # The BOM makes the source encoding explicit for every supported Inno version.
+    (languages / 'Korean.isl').write_bytes(b'\xef\xbb\xbf' + translation.lstrip(b'\xef\xbb\xbf'))
+    return inspect_iscc(str(destination / compiler.name))
 
 
 def build() -> dict:
@@ -26,6 +44,7 @@ def build() -> dict:
         raise BuildError('Inno Setup compiler ISCC.exe was not found on the Windows runner')
     run = ROOT / 'build' / 'windows-run'
     run.mkdir(parents=True, exist_ok=False)
+    compiler = prepare_installer_compiler(compiler, ROOT / 'build' / 'inno-setup')
     workspace = Path(os.environ.get('RUNNER_TEMP', str(ROOT / 'build'))) / 'TVBuild'
     job = {'source': str(source), 'icon_path': '', 'engines_root': '',
            'run_dir': str(run), 'workspace': str(workspace),
@@ -34,7 +53,8 @@ def build() -> dict:
            'include_office': False, 'builder_root': str(ROOT),
            'compliance_root': str(ROOT / 'build' / 'compliance')}
     atomic_json(run / 'job.json', job)
-    subprocess.run([sys.executable, '-u', str(BUILD_TOOLS / 'build_runner.py'), str(run / 'job.json')], check=True)
+    subprocess.run([sys.executable, '-u', str(BUILD_TOOLS / 'build_runner.py'), str(run / 'job.json')],
+                   check=True, env=clean_environment())
     result = read_json(run / 'Build_Result.json')
     if result.get('status') != 'passed' or result.get('windows_exe_checks_passed') is not True:
         raise BuildError('The original Windows EXE checks did not pass')
