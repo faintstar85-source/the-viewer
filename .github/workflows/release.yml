@@ -27,12 +27,18 @@ on:
         description: Publish the checked installer for app updates (false keeps a draft)
         type: boolean
         default: false
+      reuse_run_id:
+        description: Optional original build run ID (required when matching artifacts are ambiguous)
+        type: string
+        default: ''
 permissions:
   contents: read
+  actions: read
 env:
   PYTHONUTF8: '1'
   PYTHONIOENCODING: utf-8
   INPUT_PUBLISH: ${{ github.event_name == 'workflow_dispatch' && toJSON(inputs.publish) || '' }}
+  INPUT_REUSE_RUN_ID: ${{ inputs.reuse_run_id || '' }}
 concurrency:
   group: viewer-release-${{ github.ref }}
   cancel-in-progress: false
@@ -43,9 +49,12 @@ jobs:
     outputs:
       version: ${{ steps.config.outputs.version }}
     steps:
+      - name: Preserve committed input bytes
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
@@ -56,12 +65,45 @@ jobs:
       - name: Resolve release settings
         id: config
         run: python scripts/ci_common.py
-  windows-build:
+  select-artifact:
     needs: validate
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Draft release discovery requires push access, even for public repos.
+    # The selection script performs only reads; build jobs remain read-only.
+    permissions:
+      contents: write
+      actions: read
+    outputs:
+      mode: ${{ steps.select.outputs.mode }}
+      artifact_name: ${{ steps.select.outputs.artifact_name }}
+      artifact_id: ${{ steps.select.outputs.artifact_id }}
+    steps:
+      - name: Preserve committed input bytes
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Preserve public releases or select the original checked build
+        id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/release_artifact.py select
+  windows-build:
+    needs: [validate, select-artifact]
+    if: needs.select-artifact.outputs.mode == 'build'
     runs-on: windows-2022
     timeout-minutes: 90
+    outputs:
+      artifact_id: ${{ steps.artifact.outputs.artifact-id }}
     steps:
+      - name: Preserve committed input bytes
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
@@ -74,12 +116,14 @@ jobs:
       - name: Build and check source, EXE, final location and installer
         run: python -u scripts/build_windows_release.py
       - name: Keep checked distribution
+        id: artifact
         uses: actions/upload-artifact@v4
         with:
-          name: viewer-windows-${{ needs.validate.outputs.version }}-${{ github.sha }}-${{ github.run_attempt }}
+          name: ${{ needs.select-artifact.outputs.artifact_name }}
           path: dist/
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 90
+          compression-level: 0
       - name: Keep build diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
@@ -92,23 +136,33 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
   release:
-    needs: [validate, windows-build]
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: [validate, select-artifact, windows-build]
+    if: >-
+      ${{ !cancelled() && needs.validate.result == 'success' &&
+          needs.select-artifact.result == 'success' &&
+          (needs.select-artifact.outputs.mode == 'reuse' ||
+           (needs.select-artifact.outputs.mode == 'build' && needs.windows-build.result == 'success')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: write
+      actions: read
+    env:
+      RELEASE_ARTIFACT_ID: ${{ needs.select-artifact.outputs.artifact_id || needs.windows-build.outputs.artifact_id }}
     steps:
+      - name: Preserve committed input bytes
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
-      - uses: actions/download-artifact@v4
-        with:
-          name: viewer-windows-${{ needs.validate.outputs.version }}-${{ github.sha }}-${{ github.run_attempt }}
-          path: dist/
+      - name: Restore exact artifact ID and verify archive, inputs and original build jobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/release_artifact.py restore
       - name: Verify files and prepare draft or publish checked release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -120,6 +174,7 @@ jobs:
           name: viewer-release-status-${{ github.sha }}-${{ github.run_attempt }}
           path: |
             dist/BUILD_VERIFICATION.json
+            dist/ARTIFACT_RESTORE.json
             dist/Release_State.json
             dist/Upload_Result.json
             dist/gh_*.out
