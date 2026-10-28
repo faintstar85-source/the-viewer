@@ -290,7 +290,7 @@ from collections import OrderedDict
 from contextlib import contextmanager
 
 APP_NAME = 'The Viewer (정)'
-APP_VERSION = '3.13.41'
+APP_VERSION = '3.13.42'
 ENGINE_PROFILE = 'permissive-pdf'
 OFFICE_BUNDLED = False
 BLOG_URL = 'https://blog.naver.com/faintstar'
@@ -2092,11 +2092,44 @@ def safe_font_families():
             and not QFontDatabase.isPrivateFamily(f) and QFontDatabase.isSmoothlyScalable(f))
 
 
+def font_family_key(name):
+    name=re.sub(r'^/?[A-Z]{6}\+','',str(name or '')).strip().lstrip('/')
+    key=re.sub(r'[^\w]','',name).casefold()
+    return {'맑은고딕':'malgungothic','맑은고딕semilight':'malgungothicsemilight',
+            '굴림':'gulim','굴림체':'gulimche','돋움':'dotum','돋움체':'dotumche',
+            '바탕':'batang','바탕체':'batangche'}.get(key,key)
+
+
+def installed_font_family(requested,families=None):
+    families=safe_font_families() if families is None else families
+    lookup={font_family_key(f):f for f in reversed(families)}
+    name=re.sub(r'^/?[A-Z]{6}\+','',str(requested or '')).strip().lstrip('/')
+    for _ in range(4):
+        match=lookup.get(font_family_key(name))
+        if match:return match
+        shortened=re.sub(r'[-, _]?(?:BoldItalic|BoldOblique|SemiBold|DemiBold|Regular|Bold|Italic|Oblique|PSMT|MT)$','',name,flags=re.I)
+        if shortened==name:break
+        name=shortened
+    return ''
+
+
+def prioritized_font_families(document_fonts=(),families=None):
+    installed=tuple(safe_font_families() if families is None else families)
+    result=[];seen=set()
+    for name in (*document_fonts,'맑은 고딕','Malgun Gothic','굴림','돋움','바탕'):
+        family=installed_font_family(name,installed)
+        key=font_family_key(family)
+        if family and key not in seen:result.append(family);seen.add(key)
+    for family in installed:
+        key=font_family_key(family)
+        if key not in seen:result.append(family);seen.add(key)
+    return tuple(result)
+
+
 def safe_font_family(requested=''):
     from PySide6.QtGui import QFontDatabase
-    families=safe_font_families(); lookup={re.sub(r'[^\w]','',f).casefold():f for f in families}
-    key=re.sub(r'[^\w]','',str(requested)).casefold()
-    if key in lookup:return lookup[key]
+    families=safe_font_families();match=installed_font_family(requested,families)
+    if match:return match
     for preferred in ('Malgun Gothic','맑은 고딕','Noto Sans CJK KR','Noto Sans KR','Arial','DejaVu Sans'):
         if preferred in families:return preferred
     return families[0] if families else QFontDatabase.systemFont(QFontDatabase.GeneralFont).family()
@@ -5080,6 +5113,11 @@ class TranslationSettings(QWidget):
         super().__init__();self.owner=owner;self.dialog=dialog
         layout=QVBoxLayout(self);layout.setSpacing(10)
         title=QLabel('DeepL · 한국어 PDF 번역');title.setStyleSheet('font-size:17px;font-weight:600;');layout.addWidget(title)
+        self.show_toolbar_button=QCheckBox('상단에 번역 버튼 표시')
+        self.show_toolbar_button.setObjectName('show_translate_toolbar_button')
+        self.show_toolbar_button.setChecked(owner.settings.value('toolbar/show_translate',False,type=bool))
+        self.show_toolbar_button.toggled.connect(lambda checked:owner.set_toolbar_button_visible('translate',checked))
+        layout.addWidget(self.show_toolbar_button)
         self.key=QLineEdit(owner.deepl_api_key);self.key.setEchoMode(QLineEdit.EchoMode.Password)
         self.key.setPlaceholderText('DeepL API 키');self.key.setObjectName('deepl_api_key')
         row=QHBoxLayout();row.addWidget(self.key)
@@ -8342,32 +8380,63 @@ class CommunitySettings(QWidget):
 
 
 class CornerActions(QWidget):
-    """비우기 / 저장 / 번역 / 한글 / 옵션. Ctrl을 누를 때만 단축키 이름 표시."""
+    """읽기·편집 도구 모음. 변환 버튼은 설정에서 선택한 경우에만 표시한다."""
     def __init__(self, parent, host, save, translate, hangul, options, clear, right_inset=0, print_document=None):
         super().__init__(parent)
         self.host=host;self.ctrl_down=False;self.right_inset=right_inset
         layout=QHBoxLayout(self);layout.setContentsMargins(0,0,0,0);layout.setSpacing(3)
         self.clear_button=QToolButton(self);self.save_button=QToolButton(self);self.translate_button=QToolButton(self)
         self.hangul_button=QToolButton(self);self.options_button=QToolButton(self);self.print_button=QToolButton(self)
+        self.edit_button=QToolButton(self);self.edit_button.setObjectName('pdf_edit_button')
+        self.edit_button.setCheckable(True);self.edit_button.setAccessibleName('PDF 글/그림 편집')
         for button,kind,tip,callback in [(self.clear_button,'clear','전체 비우기 · 새 작업 · Ctrl+N',clear),
                                         (self.save_button,'save','전체 PDF 저장 · Ctrl+S',save),
                                         (self.print_button,'print','인쇄 · Ctrl+P',print_document),
+                                        (self.edit_button,'edit','PDF 글/그림 편집',self.toggle_edit),
                                         (self.translate_button,'translate','현재 전체 PDF 번역 · Ctrl+T',translate),
                                         (self.hangul_button,'hangul','한글 변환 · Ctrl+H',hangul),
                                         (self.options_button,'options','옵션 · Ctrl+O',options)]:
-            button.setIcon(corner_icon(kind));button.setIconSize(QSize(22,22));button.setFixedSize(28,28)
+            button.setIcon(edit_icon() if kind=='edit' else corner_icon(kind));button.setIconSize(QSize(22,22));button.setFixedSize(28,28)
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus);button.setToolTip(tip)
-            button.setStyleSheet('QToolButton{background:rgba(29,34,45,220);color:#e4e8f2;border:1px solid #465064;border-radius:6px;padding:1px;font-size:11px;} QToolButton:hover{background:#4b303e;border-color:#ff667a;} QToolButton:pressed{background:#78283d;} QToolButton:disabled{border-color:#303746;}')
+            button.setStyleSheet('QToolButton{background:rgba(29,34,45,220);color:#e4e8f2;border:1px solid #465064;border-radius:6px;padding:1px;font-size:11px;} QToolButton:hover{background:#4b303e;border-color:#ff667a;} QToolButton:pressed{background:#78283d;} QToolButton:checked{background:#8c304b;border-color:#ff819c;} QToolButton:disabled{border-color:#303746;}')
             button.clicked.connect(callback);layout.addWidget(button)
         owner=getattr(host,'owner',host)
         self.save_button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.save_button.customContextMenuRequested.connect(lambda pos:owner.show_save_menu(self.save_button.mapToGlobal(pos)))
         self.shortcuts=[]
         QApplication.instance().installEventFilter(self)
+        self.sync_visibility();self.sync_edit_state()
         self.set_ctrl(False,force=True)
 
+    def sync_visibility(self):
+        owner=getattr(self.host,'owner',self.host)
+        for kind in ('translate','hangul'):
+            getattr(self,kind+'_button').setVisible(owner.settings.value('toolbar/show_'+kind,False,type=bool))
+        self.place()
+
+    def sync_edit_state(self):
+        owner=getattr(self.host,'owner',self.host)
+        editor=self.host if hasattr(self.host,'page') else getattr(owner,'preview_dialog',None)
+        page=getattr(editor,'page',None)
+        if page is None and hasattr(owner,'toolbar_edit_page'):page=owner.toolbar_edit_page()
+        enabled=(page is not None and not page.is_text_document and not page.is_document_card
+                 and not getattr(editor,'closed',False) and not getattr(editor,'dual_secondary',False)
+                 and not getattr(editor,'busy',False) and not getattr(owner,'clear_pending',False)
+                 and not getattr(owner,'pending_import',None) and not getattr(owner,'imports',[])
+                 and not getattr(owner,'import_cancelling',False) and not getattr(owner,'page_batch_job',None))
+        active=bool(editor is not None and not getattr(editor,'closed',False) and getattr(editor,'mode','pan')=='edit')
+        blocked=self.edit_button.blockSignals(True)
+        self.edit_button.setChecked(active);self.edit_button.blockSignals(blocked)
+        self.edit_button.setEnabled(bool(enabled))
+        self.edit_button.setToolTip('PDF 글/그림 편집 중 · 다시 누르면 읽기 모드' if active else 'PDF 글/그림 편집 · 문서의 글자·그림·표선 수정')
+
+    def toggle_edit(self):
+        try:self.host.toggle_document_edit()
+        finally:self.sync_edit_state()
+
     def place(self):
-        self.setFixedSize(sum(self.layout().itemAt(i).widget().width() for i in range(self.layout().count()))+max(0,self.layout().count()-1)*self.layout().spacing(),28)
+        buttons=[self.layout().itemAt(i).widget() for i in range(self.layout().count()) if not self.layout().itemAt(i).widget().isHidden()]
+        self.setFixedSize(sum(b.width() for b in buttons)+max(0,len(buttons)-1)*self.layout().spacing(),28)
         self.move(max(4,self.parentWidget().width()-self.right_inset-self.width()-6),6);self.raise_()
 
     def set_ctrl(self, down, force=False):
@@ -8381,6 +8450,9 @@ class CornerActions(QWidget):
             button.setText(text if down else '')
             button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon if down else Qt.ToolButtonStyle.ToolButtonIconOnly)
             button.setFixedWidth(max(84,button.fontMetrics().horizontalAdvance(text)+32) if down else 28)
+        self.edit_button.setText('편집' if down else '')
+        self.edit_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon if down else Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.edit_button.setFixedWidth(84 if down else 28)
         self.place()
 
     def eventFilter(self, watched, event):
@@ -8415,12 +8487,15 @@ def fit_document_window(widget, single_file, screen=None):
 
 
 def edit_icon():
-    """첨부 예시처럼 열린 사각형과 연필을 벡터로 그린다."""
+    """접힌 문서와 연필을 작은 도구 모음에서도 구분되게 그린다."""
     pm = QPixmap(64, 64); pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm); p.setRenderHint(QPainter.RenderHint.Antialiasing)
     p.setPen(QPen(QColor('#e4e8f2'), 3.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-    path = QPainterPath(QPointF(33,16)); path.lineTo(12,16); path.lineTo(12,53)
-    path.lineTo(49,53); path.lineTo(49,33); p.drawPath(path)
+    path = QPainterPath(QPointF(12,8));path.lineTo(35,8);path.lineTo(47,20)
+    path.lineTo(47,53);path.lineTo(12,53);path.closeSubpath();p.drawPath(path)
+    p.drawPolyline([QPointF(35,8),QPointF(35,20),QPointF(47,20)])
+    p.drawLine(QPointF(19,28),QPointF(28,28));p.drawLine(QPointF(19,36),QPointF(24,36))
+    p.setBrush(QColor('#f3c674'));p.setPen(QPen(QColor('#fff0cc'),2.5,Qt.PenStyle.SolidLine,Qt.PenCapStyle.RoundCap,Qt.PenJoinStyle.RoundJoin))
     pencil = QPainterPath(QPointF(25,41)); pencil.lineTo(28,29); pencil.lineTo(49,8)
     pencil.quadTo(51,6,53,8); pencil.lineTo(58,13); pencil.quadTo(60,15,58,17)
     pencil.lineTo(37,38); pencil.closeSubpath(); p.drawPath(pencil)
@@ -9075,10 +9150,81 @@ class SafeFontCombo(QComboBox):
     """Names use the UI font, so opening the list never renders bitmap fonts."""
     currentFontChanged=Signal(QFont)
     def __init__(self,parent=None):
-        super().__init__(parent);self.addItems(safe_font_families())
-        self.currentTextChanged.connect(lambda name:self.currentFontChanged.emit(QFont(name)))
-    def currentFont(self):return QFont(safe_font_family(self.currentText()))
-    def setCurrentFont(self,font):self.setCurrentText(safe_font_family(font.family()))
+        super().__init__(parent);self.document_fonts=();self.setMaxVisibleItems(20)
+        self.view().setMinimumWidth(260)
+        self.set_document_fonts(())
+        self.currentIndexChanged.connect(lambda _index:self.currentFontChanged.emit(self.currentFont()))
+    def currentFont(self):return QFont(safe_font_family(self.currentData() or self.currentText()))
+    def setCurrentFont(self,font):
+        index=self.findData(safe_font_family(font.family()))
+        if index>=0:self.setCurrentIndex(index)
+    def set_document_fonts(self,names):
+        self.document_fonts=tuple(dict.fromkeys(name for name in names if name))
+        families=prioritized_font_families(self.document_fonts)
+        if tuple(self.itemData(i) for i in range(self.count()))==families:return
+        selected=self.currentData() or safe_font_family()
+        blocked=self.blockSignals(True)
+        try:
+            self.clear()
+            for family in families:
+                label='맑은 고딕 (Malgun Gothic)' if family=='Malgun Gothic' else family
+                self.addItem(label,family)
+            index=self.findData(selected);self.setCurrentIndex(index if index>=0 else 0)
+        finally:self.blockSignals(blocked)
+
+
+def editing_ui_package_selftest():
+    """Exercise the edit toolbar and font choices using temporary preferences only."""
+    from types import SimpleNamespace
+    families=('Arial','Batang','Malgun Gothic','Noto Sans KR')
+    if installed_font_family('ABCDEF+MalgunGothicBold',families)!='Malgun Gothic':
+        raise ValueError('PDF 부분 글꼴 이름과 맑은 고딕 연결 실패')
+    if prioritized_font_families(('ABCDEF+Batang','없는 글꼴'),families)[:2]!=('Batang','Malgun Gothic'):
+        raise ValueError('문서 사용 글꼴 우선 정렬 실패')
+    combo=SafeFontCombo();bars=[];host=QWidget();host.resize(640,100)
+    try:
+        available=safe_font_families()
+        if not available:raise ValueError('사용할 수 있는 설치 글꼴이 없습니다.')
+        chosen=available[-1];combo.setCurrentFont(QFont(chosen));before=combo.currentFont().family();signals=[]
+        combo.currentFontChanged.connect(lambda _font:signals.append(True))
+        combo.set_document_fonts((chosen,))
+        if combo.itemData(0)!=installed_font_family(chosen) or combo.currentFont().family()!=before or signals:
+            raise ValueError('글꼴 목록 정렬이 선택 글꼴을 바꾸거나 서식 변경 신호를 보냈습니다.')
+        with tempfile.TemporaryDirectory(prefix='viewer_edit_ui_') as folder:
+            settings=QSettings(str(Path(folder)/'settings.ini'),QSettings.Format.IniFormat)
+            keys=SimpleNamespace(bindings={name:[] for name in ('clear','save','print','translate','hangul','options')},describe=lambda _name:'')
+            owner=SimpleNamespace(settings=settings,keys=keys,preview_dialog=None)
+            host.owner=owner;host.page=SimpleNamespace(is_text_document=False,is_document_card=False)
+            host.mode='pan';host.set_mode=lambda mode:setattr(host,'mode',mode)
+            host.toggle_document_edit=lambda:PreviewDialog.toggle_document_edit(host)
+            noop=lambda:None
+            bar=CornerActions(host,host,noop,noop,noop,noop,noop,print_document=noop);bars.append(bar)
+            if not bar.translate_button.isHidden() or not bar.hangul_button.isHidden():
+                raise ValueError('한글·번역 버튼이 기본으로 숨겨지지 않았습니다.')
+            width=bar.width()
+            if bar.edit_button.icon().isNull() or not bar.edit_button.isEnabled():
+                raise ValueError('문서·연필 편집 버튼을 사용할 수 없습니다.')
+            bar.edit_button.click()
+            if host.mode!='edit' or not bar.edit_button.isChecked():raise ValueError('편집 버튼 진입 상태 불일치')
+            bar.edit_button.click()
+            if host.mode!='pan' or bar.edit_button.isChecked():raise ValueError('편집 버튼 해제 상태 불일치')
+            Window.set_toolbar_button_visible(owner,'translate',True)
+            if bar.translate_button.isHidden() or not bar.hangul_button.isHidden() or bar.width()<=width:
+                raise ValueError('번역 버튼 표시 설정 또는 도구 모음 너비 갱신 실패')
+            restored=CornerActions(host,host,noop,noop,noop,noop,noop,print_document=noop);bars.append(restored)
+            if restored.translate_button.isHidden() or not restored.hangul_button.isHidden():
+                raise ValueError('새 도구 모음에서 버튼 표시 설정을 복원하지 못했습니다.')
+            Window.set_toolbar_button_visible(owner,'hangul',True)
+            Window.set_toolbar_button_visible(owner,'translate',False)
+            if any(not b.translate_button.isHidden() or b.hangul_button.isHidden() for b in bars):
+                raise ValueError('열려 있는 도구 모음의 독립 표시 설정 동기화 실패')
+            settings.sync()
+        return {'document_fonts_first':True,'malgun_alias_and_pdf_subset':True,
+                'font_selection_preserved_without_edit_signal':True,'edit_button_toggle':True,
+                'conversion_buttons_default_hidden':True,'preferences_restored_and_synced':True}
+    finally:
+        combo.deleteLater();host.deleteLater()
+        QApplication.sendPostedEvents(None,QEvent.Type.DeferredDelete)
 
 
 class PageNumberDesignDialog(QDialog):
@@ -12039,7 +12185,7 @@ class PreviewDialog(QDialog):
             spin.setKeyboardTracking(False); spin.setFixedWidth(125)
             spin.valueChanged.connect(self.coordinate_changed); spin.editingFinished.connect(self.commit_move)
         style_row=QHBoxLayout();move_layout.addLayout(style_row)
-        self.edit_font=SafeFontCombo();self.edit_font.setFixedWidth(112);self.edit_font.setToolTip('글꼴')
+        self.edit_font=SafeFontCombo();self.edit_font.setFixedWidth(142);self.edit_font.setToolTip('현재 쪽 사용 글꼴 → 맑은 고딕 → 설치 글꼴')
         self.edit_size=QDoubleSpinBox();self.edit_size.setRange(4,144);self.edit_size.setDecimals(1)
         self.edit_size.setSuffix(' pt');self.edit_size.setFixedWidth(70);self.edit_size.setToolTip('글자 크기')
         self.edit_bold=QToolButton();self.edit_bold.setText('B');self.edit_bold.setCheckable(True);self.edit_bold.setToolTip('굵게')
@@ -12539,6 +12685,9 @@ class PreviewDialog(QDialog):
             menu.addAction('개체 붙여넣기',self.paste_clipboard)
         menu.exec(global_pos if global_pos is not None else QCursor.pos());menu.deleteLater()
 
+    def toggle_document_edit(self):
+        self.set_mode('pan' if self.mode=='edit' else 'edit')
+
     def set_mode(self,mode):
         if self.dual_secondary and mode!='pan':mode='pan'
         if self.page.is_text_document and mode!='pan':
@@ -12558,6 +12707,8 @@ class PreviewDialog(QDialog):
             self.image_panel.hide()
         previous_mode=self.mode
         self.mode=mode;self.view.clear_gesture();self.view.background_pan=False
+        if hasattr(self,'actions'):self.actions.sync_edit_state()
+        if getattr(self.owner,'preview_dialog',None) is self and hasattr(self.owner,'actions'):self.owner.actions.sync_edit_state()
         if mode!='edit':self.view.range_start=self.view.range_end=self.view.range_screen_start=None
         if mode!=previous_mode:
             if mode!='pan':
@@ -12668,7 +12819,8 @@ class PreviewDialog(QDialog):
             self.paste_queue.clear();self.set_mode('pan');QMessageBox.warning(self,'편집 영역',error)
             if callback:QTimer.singleShot(0,callback)
             return
-        self.info=info;self.view.set_page_geometry(info['width'],info['height']);self.set_mode(self.mode)
+        self.info=info;self.refresh_document_fonts(info)
+        self.view.set_page_geometry(info['width'],info['height']);self.set_mode(self.mode)
         if self.bulk_restore and self.mode=='edit':self.restore_bulk_selection()
         self.view.viewport().update()
         if self.mode=='edit' and self.restore_selection:
@@ -12810,6 +12962,9 @@ class PreviewDialog(QDialog):
         self.prepared_edit_key=None;self.prepared_edit_info=None
         self.prepare_edit_waiter=None;self.prepare_edit_failed_key=None
         self.page = page; self.info = None; self.loading_info = False
+        self.edit_font.set_document_fonts(())
+        if hasattr(self,'actions'):self.actions.sync_edit_state()
+        if getattr(self.owner,'preview_dialog',None) is self and hasattr(self.owner,'actions'):self.owner.actions.sync_edit_state()
         self.reading_base_pix=QPixmap()
         self.view.setBackgroundBrush(self.reading_background())
         self.update_text_controls()
@@ -13083,12 +13238,22 @@ class PreviewDialog(QDialog):
             else:self.view.setFocus()
         else:self.requested_side=0;self.request_image()
 
+    def refresh_document_fonts(self,info,selected=None):
+        weights={}
+        for span in info.get('spans',[]):
+            name=span.get('family') or span.get('font','')
+            weights[name]=weights.get(name,0)+len(span.get('text',''))
+        names=sorted(weights,key=lambda name:-weights[name])
+        if selected:names.insert(0,selected.get('family') or selected.get('font',''))
+        self.edit_font.set_document_fonts(names)
+
     def load_format_controls(self,element,cursor_state=None):
         self.format_layout_key=None;self.inline_style_key=None
         self.text_target=list(element['rect']) if element.get('object_id') and not element.get('native_origin') else None
         self.text_frame_manual=bool(element.get('text_frame',element.get('object_id'))) and not bool(element.get('native_origin'))
         self.text_base_rect=None;self.text_resized=False;self.move_offset=[0.0,0.0]
         for widget in (self.edit_font,self.edit_size,self.edit_bold,self.inline_text):widget.blockSignals(True)
+        self.refresh_document_fonts(self.info or {},element)
         self.inline_text.setPlainText(element.get('text',''))
         from PySide6.QtGui import QTextCursor
         cursor=self.inline_text.textCursor();length=self.inline_text.document().characterCount()-1
@@ -13096,7 +13261,9 @@ class PreviewDialog(QDialog):
         cursor.setPosition(max(0,min(length,anchor)));cursor.setPosition(max(0,min(length,position)),QTextCursor.MoveMode.KeepAnchor)
         self.inline_text.setTextCursor(cursor)
         self.edit_font.setCurrentFont(QFont(element.get('family',element.get('font','sans-serif'))))
-        self.edit_font.setToolTip('원본 글꼴: '+element.get('font','미상')+'\n서식 적용 시 선택한 설치 글꼴로 다시 씁니다.')
+        original=element.get('family') or element.get('font','미상')
+        unavailable='' if installed_font_family(original) else '\n원본 글꼴이 이 PC에 없어 대체 글꼴을 표시합니다.'
+        self.edit_font.setToolTip('원본 글꼴: '+element.get('font','미상')+unavailable+'\n현재 쪽 사용 글꼴 → 맑은 고딕 → 설치 글꼴\n서식 적용 시 선택한 설치 글꼴로 다시 씁니다.')
         self.edit_size.setValue(element.get('size',11));self.edit_bold.setChecked(element.get('bold',False))
         for widget in (self.edit_font,self.edit_size,self.edit_bold,self.inline_text):widget.blockSignals(False)
         self.format_color=QColor(element.get('color','#111111'))
@@ -14979,6 +15146,11 @@ class HangulModeSettings(QWidget):
 class HangulSettings(QWidget):
     def __init__(self,owner,dialog):
         super().__init__();layout=QVBoxLayout(self);form=QFormLayout();layout.addLayout(form)
+        self.show_toolbar_button=QCheckBox('상단에 한글 변환 버튼 표시')
+        self.show_toolbar_button.setObjectName('show_hangul_toolbar_button')
+        self.show_toolbar_button.setChecked(owner.settings.value('toolbar/show_hangul',False,type=bool))
+        self.show_toolbar_button.toggled.connect(lambda checked:owner.set_toolbar_button_visible('hangul',checked))
+        form.addRow(self.show_toolbar_button)
         self.format=QComboBox();self.format.addItems(['HWPX (.hwpx)','HWP (.hwp)']);self.format.setCurrentIndex(int(owner.settings.value('hangul/format',0)))
         self.dpi=QComboBox();self.dpi.addItems(['200','300','450','600']);self.dpi.setCurrentText(str(owner.settings.value('hangul/dpi','300')))
         self.format.currentIndexChanged.connect(lambda v:owner.settings.setValue('hangul/format',v));self.dpi.currentTextChanged.connect(lambda v:owner.settings.setValue('hangul/dpi',v))
@@ -15949,6 +16121,23 @@ class Window(QMainWindow):
             if canvas_had_focus:self.focus_content()
         self.thumbnail_rail.sync();self.place_actions();self.prioritize_thumbnails()
 
+    def toolbar_edit_page(self):
+        editor=self.preview_dialog
+        if editor is not None and not editor.closed:return editor.page
+        return next((p for p in self.pages if p.uid in self.canvas.selected),self.pages[0] if self.pages else None)
+
+    def toggle_document_edit(self):
+        page=self.toolbar_edit_page()
+        if page is None or page.is_text_document or page.is_document_card:return
+        editor=self.open_preview(page)
+        if editor is not None:editor.toggle_document_edit()
+
+    def set_toolbar_button_visible(self,kind,visible):
+        if kind not in ('translate','hangul'):return
+        self.settings.setValue('toolbar/show_'+kind,bool(visible));self.settings.sync()
+        for widget in QApplication.allWidgets():
+            if isinstance(widget,CornerActions):widget.sync_visibility()
+
     def update_action_states(self):
         batch_busy=getattr(self,'page_batch_job',None) is not None
         if hasattr(self,'canvas'):self.canvas.setEnabled(bool(self.pages) and not self.clear_pending and not batch_busy)
@@ -15973,6 +16162,8 @@ class Window(QMainWindow):
                 editor.actions.save_button.setToolTip(tip)
             enabled=bool(self.pages) and not loading
             self.print_button.setEnabled(enabled);self.print_button.setToolTip('인쇄 · '+self.keys.describe('print'))
+            self.actions.sync_edit_state()
+            if editor is not None and not editor.closed:editor.actions.sync_edit_state()
             if editor is not None and not editor.closed:editor.actions.print_button.setEnabled(enabled)
             translation_tip=self.translation_status if self.translation_busy else '현재 전체 PDF 번역 · '+self.keys.describe('translate')
             self.hangul_button.setEnabled(enabled)
