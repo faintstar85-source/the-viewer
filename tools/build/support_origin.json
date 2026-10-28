@@ -1,0 +1,23 @@
+{
+  "source_manager_version": "5.0.1",
+  "source_sha256": "b8bce23a53772d916bc64ef348bc072ce568e6bbd18a137507f1459a8caef102",
+  "extracted_symbols": [
+    "COLLECT_RULES",
+    "VIEWER_CHECK_FLAG",
+    "VIEWER_CHECK_MODULE",
+    "VIEWER_CHECK_SOURCE",
+    "VIEWER_METADATA",
+    "VIEWER_RUNTIME_HOOK_SOURCE",
+    "detect_viewer_profile",
+    "hwpx_build_requirement",
+    "prepare_viewer_check",
+    "validate_hwpx_bundle",
+    "verify_viewer_report",
+    "viewer_collection_options",
+    "viewer_probe_environment"
+  ],
+  "support_sha256": "e9f520b76526f8ee424c35f78699d88c2ec826618635dbfbfdfbbebbe59b980a",
+  "original_support_sha256": "367a6826236d7c9ec38cfd4ec010f659990ab550ef4610f8a93f78753e8bdda4",
+  "updated_tool_version": "1.5.8",
+  "changes": "PDFium/pypdf/ReportLab collection and actual PDF round-trip checks; PyMuPDF/libvips removed; DWG/AI/EPS rejection checks; optional Office only; LGPL/source/archive build gates. Lightweight PDFium 5.14.0 read worker RGB/PNG and form-fallback pixel checks added; Qt source gate remains 6.11.1."
+}

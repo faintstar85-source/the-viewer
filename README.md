@@ -6,9 +6,25 @@ Windows용 PDF·사진 뷰어입니다. 여러 자료의 페이지를 정리하�
 
 ## 문서 기준
 
-이 안내는 **The Viewer v3.13.39 소스**를 기준으로 작성했습니다. 실제 공개된 설치 파일과 배포 버전은 [GitHub Releases](https://github.com/faintstar85-source/the-viewer/releases)에서 확인하세요.
+이 안내의 현재 소스 기준은 **The Viewer v3.13.41**입니다. 실제 공개된 설치 파일과 배포 버전은 [GitHub Releases](https://github.com/faintstar85-source/the-viewer/releases)에서 확인하세요.
 
 일반 사용자는 릴리스에 첨부된 설치 EXE를 사용합니다. 설치 배포본은 Python을 별도로 설치하지 않고 실행할 수 있습니다.
+
+## 코드 수정과 자동 배포
+
+저장소의 `pdf_page_dragger.py`와 `release.json`을 함께 업데이트하면 GitHub Actions가 Windows 설치 파일을 만듭니다. 제작 PC에서 별도 패키징·업로드 프로그램을 실행할 필요가 없습니다.
+
+- 소스·빌드 도구 검사 → Windows 소스·EXE·최종 위치 검사 → 설치 EXE·ZIP 생성 → 첨부파일 크기·SHA-256 확인 순서로 진행합니다.
+- `release.json`의 `publish`가 `true`이면 검사 후 공개하고, `false`이면 초안으로 준비합니다. 이미 배포한 버전은 다시 사용하지 않습니다.
+- 사용자는 기존 **정 → 업데이트**에서 새 설치 파일을 확인합니다.
+
+[자동 빌드·배포 상태](https://github.com/faintstar85-source/the-viewer/actions/workflows/release.yml) · [제작자 안내](docs/BUILD_AND_GITHUB.md)
+
+## v3.13.40–3.13.41 변경사항
+
+- 내부 페이지 드래그 전에 임시 PDF 사본을 만들던 처리를 생략했습니다.
+- 사진 한 장을 직접 열어도 사진이 든 폴더를 기준으로 인접 폴더를 탐색합니다.
+- 3.13.41에는 GitHub에서 빌드·검사·배포를 수행하는 자동화를 추가했습니다. 기존 저장소의 아이콘을 유지합니다.
 
 ## v3.13.39 변경사항
 
@@ -98,7 +114,7 @@ DeepL API 키를 설정해 PDF를 한국어로 번역하고, PDF의 글·표·�
 
 설치 EXE를 실행하고, PDF/JPG 기본 앱으로 사용할 경우 Windows 기본 앱 설정에서 The Viewer를 선택합니다. 프로그램의 **정 → 업데이트**에서도 새 버전을 확인할 수 있습니다.
 
-ZIP 배포본은 압축을 풀고 동봉 파일을 함께 유지합니다. 소스 빌드와 GitHub 업로드는 별도의 제작자 안내를 참고하세요.
+ZIP 배포본은 압축을 풀고 동봉 파일을 함께 유지합니다. 코드 수정과 GitHub 자동 배포는 제작자 안내를 참고하세요.
 
 [설치·업데이트 안내](docs/INSTALL_AND_UPDATE.md) · [패키징·GitHub 업로드](docs/BUILD_AND_GITHUB.md)
 
@@ -126,3 +142,4 @@ v3.13.39 소스에는 **DWG·AI·EPS·PS 직접 읽기**가 포함되어 있지 
 - [수정 기록](CHANGELOG.md)
 - [v3.13.39 릴리스 설명](releases/RELEASE_NOTES_v3.13.39.md)
 - [뷰어 소스](pdf_page_dragger.py)
+

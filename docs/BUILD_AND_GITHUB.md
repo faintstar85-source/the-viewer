@@ -1,47 +1,50 @@
-# 패키징과 GitHub 업데이트 — v3.13.39
+# GitHub에서 빌드·검사·배포
 
-[사용 안내](PROGRAM_GUIDE.md) · [업로드 순서](../UPLOAD_GUIDE.md)
+The Viewer는 `faintstar85-source/the-viewer` 저장소에서 관리합니다. 제작 PC에서 별도의 패키징·업로드 프로그램을 실행하는 절차를 GitHub Actions로 옮겼습니다.
 
-## Windows 빌드
+## 다음 업데이트
 
-보완된 제작 묶음은 `TheViewer_v3.13.39_Build_Complete.zip`입니다. 전체 압축을 풀고 `START_BUILD.py`를 실행하면 뷰어 소스와 동봉된 compliance 경로를 지정해 패키징 v1.5.9를 엽니다.
+1. 저장소의 `pdf_page_dragger.py`를 수정하고 `APP_VERSION`을 새 버전으로 올립니다.
+2. `releases/RELEASE_NOTES_v새버전.md`에 변경 내용을 작성합니다.
+3. `release.json`의 `version`, `notes`를 같은 버전으로 맞춥니다. `publish: true`이면 검사 후 공개하며, `false`이면 초안으로 준비합니다.
+4. `main`에 반영합니다. Actions의 **Build and release The Viewer**가 처리합니다.
 
-1. 선택된 소스가 `The_Viewer_v3.13.39.py`인지 확인합니다.
-2. 아이콘을 바꾸려면 빌드 전에 ICO 파일을 지정합니다.
-3. 설치 파일이 필요하면 **설치 EXE도 만들기**와 Inno Setup의 **ISCC.exe**를 지정합니다.
-4. **패키징 시작**을 누르고 결과와 진단 로그를 확인합니다.
+ChatGPT의 GitHub 연결로 이 파일들을 직접 수정할 수 있습니다. 사용자에게 PY를 내려받아 제작 PC에서 다시 빌드하도록 요구할 필요가 없습니다.
 
-compliance에는 Qt/PySide6 6.11.1과 certifi의 라이선스·대응 소스가 들어 있습니다. PY만 따로 옮기거나 자료를 누락하면 자료 검사에서 중단될 수 있습니다. MD 문서 ZIP은 이 빌드 자료를 대신하지 않습니다.
+## 자동 처리 내용
 
-설치 EXE의 기본 파일명은 `The_Viewer_Setup_3.13.39_x64.exe`입니다. 설치 EXE 제작을 선택하지 않은 빌드에는 이 파일이 생성되지 않습니다.
+- 소스 문법·버전 일치·내장 PDF 엔진 코드·배포 안전성 테스트.
+- Windows Server 2022 / x64 Python 3.13 환경의 기존 빌더 1.5.10 실행.
+- 기존 Qt/PySide6·certifi 대응 소스 기록과 크기·SHA-256 확인. 대응 소스는 기록된 공식 URL에서 자동으로 받습니다.
+- 소스 실행 검사, 완성 EXE 검사, 최종 배포 위치 검사와 설치 EXE 생성.
+- 설치 EXE·ZIP·PY·버전 안내·수정 내역·SHA256SUMS 준비.
+- GitHub에 초안 생성 → 첨부파일 크기·SHA-256 확인 → `publish` 설정에 따라 공개.
 
-## 문서·소스·릴리스 업로드
+Inno Setup은 Windows 실행 환경의 `ISCC.exe`를 자동 탐색합니다. 필수 자료나 검사가 빠지면 배포를 중단합니다. Office 엔진은 기존 기본값처럼 동봉하지 않으며, 사용자 PC에 설치된 LibreOffice를 사용합니다.
 
-`The_Viewer_GitHub_Manager_v2.1.2.py`를 실행합니다.
+## 상태 확인과 재시도
 
-1. **로그인 · 설정**에서 필요한 도구와 GitHub 로그인을 확인합니다.
-2. 저장소가 `faintstar85-source/the-viewer`인지 확인합니다.
-3. **간편 업로드**에 다음 세 파일을 선택합니다.
-   - `TheViewer_GitHub_Markdown_v3.13.39.zip`
-   - `The_Viewer_Setup_3.13.39_x64.exe`
-   - 빌드에 사용한 `The_Viewer_v3.13.39.py`
-4. **릴리스 설명 확인**으로 본문과 버전을 확인합니다.
-5. **업로드 시작 · 릴리스 공개**를 누릅니다.
+[자동 배포 상태](https://github.com/faintstar85-source/the-viewer/actions/workflows/release.yml)에서 실행 결과와 실패 단계를 확인합니다. 실패 시 빌드·배포 진단 기록이 Actions 첨부자료로 남습니다.
 
-MD ZIP은 풀지 않고 선택합니다. README.md, CHANGELOG.md, UPLOAD_GUIDE.md, docs/, releases/의 문서가 저장소에 반영됩니다. 뷰어 PY는 `pdf_page_dragger.py`로 준비하며 원본 파일을 보존합니다. 설치 EXE·MD ZIP·뷰어 PY를 릴리스에 첨부합니다.
+같은 버전의 기존 파일을 다른 내용으로 덮어쓰지 않습니다. 이미 초안에 파일이 올라갔거나 공개가 끝난 뒤 새로 빌드하려면 버전을 올리세요. 초안의 기존 검증 파일을 그대로 공개하려면 Releases에서 해당 초안의 공개 버튼을 사용합니다.
 
-매니저 v2.1.2의 같은 폴더 자동 선택은 v3.13.38을 기준으로 합니다. 이번 파일들은 직접 선택하세요. 선택한 PY의 실제 버전과 v3.13.39 릴리스 문서가 일치하면 입력 검사 대상이 됩니다.
+소스와 실행 환경은 전용 빌드 공간에 준비합니다. GitHub의 배포 권한은 검사에 성공한 `main` 배포 작업에만 전달합니다. Pull Request 검사는 릴리스를 만들지 않습니다.
 
-## 입력 검사
+## 사용자 프로그램 업데이트
 
-```bat
-py The_Viewer_GitHub_Manager_v2.1.2.py --check-inputs "The_Viewer_v3.13.39.py" "TheViewer_GitHub_Markdown_v3.13.39.zip"
+기존 **정 → 업데이트**를 사용합니다. 공개된 새 버전의 설치 파일을 내려받아 확인한 뒤 작업 저장·종료·설치로 연결됩니다. 기존 사용자가 GitHub Actions나 제작 도구를 조작할 필요는 없습니다.
+
+## 로컬 검사
+
+```sh
+python scripts/validate_repository.py
+python -m unittest discover -s tests -v
 ```
 
-이 명령은 PY 문법, 소스 버전, MD ZIP 구성과 해당 버전 릴리스 문서를 검사합니다. GitHub 로그인·업로드는 하지 않으며 설치 EXE의 실행 검사를 대신하지 않습니다.
+Windows 빌드 검사는 GitHub Actions 기록으로 확인합니다. 현장 PC 전체 동작, 실제 프린터 출력, DeepL 실서버 결과를 모두 확인했다는 의미는 아닙니다.
 
-## 확인 범위
+## 참고
 
-v3.13.39의 빌드 완료는 제작자가 전달했습니다. 이 문서 묶음을 준비하면서 Windows 설치·실행·탐색기 드래그를 새로 검사하거나 GitHub에 공개하지는 않았습니다. 해당 PC의 빌드 결과는 `Build_Result.json`과 로그로 확인합니다.
-
-기준 자료: `The_Viewer_GitHub_Manager_v2.1.2.py`의 `check_local_inputs`, `quick_project`, `quick_publish`, `markdown_bundle` 및 [뷰어 소스](../pdf_page_dragger.py).
+- [GitHub Python 빌드](https://docs.github.com/en/actions/tutorials/build-and-test-code/python)
+- [Windows 2022 실행 환경](https://github.com/actions/runner-images/blob/main/images/windows/Windows2022-Readme.md)
+- [GitHub 릴리스 API](https://docs.github.com/en/rest/releases/releases)

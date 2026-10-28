@@ -1,19 +1,14 @@
-# v3.13.39 간편 업로드 순서
+# 업데이트 배포
 
-빌드를 완료했다면 `The_Viewer_GitHub_Manager_v2.1.2.py`를 실행합니다.
+이제 저장소에서 소스와 버전을 수정하면 GitHub가 빌드·검사·배포합니다.
 
-1. **로그인 · 설정**에서 GitHub 계정과 저장소 `faintstar85-source/the-viewer`를 확인합니다.
-2. **간편 업로드**에서 아래 세 파일을 선택하거나 함께 드롭합니다.
-   - 이 문서 묶음 `TheViewer_GitHub_Markdown_v3.13.39.zip`
-   - 빌드한 설치 파일 `The_Viewer_Setup_3.13.39_x64.exe`
-   - 빌드에 사용한 소스 `The_Viewer_v3.13.39.py`
-3. 버전이 **v3.13.39**로 표시되는지 확인하고 **릴리스 설명 확인**을 누릅니다.
-4. **업로드 시작 · 릴리스 공개**를 누릅니다.
+1. `pdf_page_dragger.py`의 코드와 `APP_VERSION`을 수정합니다.
+2. 새 버전의 `releases/RELEASE_NOTES_v버전.md`를 작성합니다.
+3. `release.json`을 같은 버전으로 맞추고 `main`에 반영합니다.
+4. [GitHub Actions](https://github.com/faintstar85-source/the-viewer/actions/workflows/release.yml)에서 결과를 확인합니다.
 
-**MD 문서 ZIP은 압축을 풀지 않고 선택합니다.** 이 ZIP에는 Markdown 문서만 있습니다. 설치 EXE, 뷰어 PY, 업로드 매니저, compliance 자료는 포함하지 않습니다.
+`publish: true`이면 설치 EXE·ZIP·PY·SHA-256 확인 후 공개합니다. `false`이면 초안으로 준비합니다. 같은 버전으로 이미 올라간 파일을 교체하지 않습니다.
 
-매니저 v2.1.2의 파일명 예시와 같은 폴더 자동 선택 기준은 v3.13.38입니다. 이번 세 파일은 직접 선택하세요. 실제 버전은 선택한 뷰어 PY에서 읽고, 그 버전의 릴리스 문서를 검사합니다.
+기존 사용자는 프로그램의 **정 → 업데이트**에서 확인합니다. 제작 PC에서 별도 패키징·업로드 프로그램을 실행할 필요가 없습니다.
 
-파일을 선택하는 것만으로 업로드하지 않습니다. 시작 버튼을 누르면 문서와 소스를 반영하고 릴리스 첨부를 확인한 뒤 공개합니다.
-
-[상세 제작 안내](docs/BUILD_AND_GITHUB.md) · [릴리스 설명](releases/RELEASE_NOTES_v3.13.39.md)
+[자동 빌드·배포 자세히 보기](docs/BUILD_AND_GITHUB.md)

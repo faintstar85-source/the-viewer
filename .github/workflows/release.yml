@@ -1,0 +1,126 @@
+name: Build and release The Viewer
+on:
+  push:
+    branches: [main]
+    paths:
+      - release.json
+      - pdf_page_dragger.py
+      - requirements.txt
+      - tools/build/**
+      - scripts/**
+      - tests/**
+      - releases/**
+      - .github/workflows/release.yml
+  pull_request:
+    paths:
+      - release.json
+      - pdf_page_dragger.py
+      - requirements.txt
+      - tools/build/**
+      - scripts/**
+      - tests/**
+      - releases/**
+      - .github/workflows/release.yml
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the checked installer for app updates (false keeps a draft)
+        type: boolean
+        default: false
+permissions:
+  contents: read
+env:
+  INPUT_PUBLISH: ${{ github.event_name == 'workflow_dispatch' && toJSON(inputs.publish) || '' }}
+concurrency:
+  group: viewer-release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.config.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Check source, configuration and release safety tests
+        run: |
+          python scripts/validate_repository.py
+          python -m unittest discover -s tests -v
+      - name: Resolve release settings
+        id: config
+        run: python scripts/ci_common.py
+  windows-build:
+    needs: validate
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          architecture: x64
+      - name: Prepare pinned source archives and notices
+        run: python scripts/prepare_compliance.py
+      - name: Build and check source, EXE, final location and installer
+        run: python -u scripts/build_windows_release.py
+      - name: Keep checked distribution
+        uses: actions/upload-artifact@v4
+        with:
+          name: viewer-windows-${{ needs.validate.outputs.version }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Keep build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: viewer-build-diagnostics-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            build/windows-run/*.json
+            build/windows-run/*.txt
+            build/windows-run/logs/
+          if-no-files-found: ignore
+          retention-days: 14
+  release:
+    needs: [validate, windows-build]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@v4
+        with:
+          name: viewer-windows-${{ needs.validate.outputs.version }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: dist/
+      - name: Verify files and prepare draft or publish checked release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/publish_release.py
+      - name: Keep release status and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: viewer-release-status-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            dist/BUILD_VERIFICATION.json
+            dist/Release_State.json
+            dist/Upload_Result.json
+            dist/gh_*.out
+            dist/gh_*.log
+          if-no-files-found: ignore
+          retention-days: 14

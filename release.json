@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "version": "3.13.41",
+  "source": "pdf_page_dragger.py",
+  "notes": "releases/RELEASE_NOTES_v3.13.41.md",
+  "publish": false,
+  "prerelease": false
+}

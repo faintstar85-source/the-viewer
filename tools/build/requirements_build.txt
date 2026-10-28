@@ -1,0 +1,24 @@
+# The Viewer 3.13.38 fast PDF reader: inherited pinned Windows build baseline.
+# Linux functional verification versions are recorded separately and can differ.
+# Native Windows installation/frozen-app verification must run on the build PC.
+PySide6==6.11.1
+pypdfium2==5.14.0
+reportlab==4.4.9
+pypdf[crypto]==6.10.0
+Pillow==12.2.0
+deepl==1.32.0
+python-hwpx==6.6.0
+certifi==2026.4.22
+lxml==6.0.2
+requests==2.34.2
+psd-tools==1.22.0
+ezdxf==1.4.4
+psutil==7.2.2
+pywin32==311; sys_platform == 'win32'
+PyInstaller>=6.16,<7
+pyinstaller-hooks-contrib>=2025.9
+altgraph>=0.17.5
+
+# Comparison baseline: OpenCV is used by the PySide6 viewer without its own GUI.
+opencv-python-headless==4.14.0.94
+numpy==2.3.5

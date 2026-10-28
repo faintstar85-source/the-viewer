@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""The Viewer (정) 3.13.39 — PDFium 기반 / LGPL Qt 배포 구성.
+"""The Viewer (정) 3.13.41 — PDFium 기반 / LGPL Qt 배포 구성.
 PDF·그림·ZIP/CBZ·텍스트·PSD·DXF·HWP/HWPX를 읽고 페이지를 검토합니다.
 Office 문서는 동봉 또는 설치된 LibreOffice가 있는 경우 PDF로 변환합니다.
 DWG·AI·EPS·PS 변환은 이 빌드에서 제외했습니다.
@@ -290,7 +290,7 @@ from collections import OrderedDict
 from contextlib import contextmanager
 
 APP_NAME = 'The Viewer (정)'
-APP_VERSION = '3.13.39'
+APP_VERSION = '3.13.41'
 ENGINE_PROFILE = 'permissive-pdf'
 OFFICE_BUNDLED = False
 BLOG_URL = 'https://blog.naver.com/faintstar'
@@ -1250,6 +1250,7 @@ def neighboring_inputs(path,include_containers=False,book_library=None):
     """이름·파일 속성만 읽는다. 책 폴더 탐색은 해당 폴더에서 찾은 ZIP/CBZ로 제한한다."""
     current=Path(path).resolve();entries=[];found=False
     current_key=os.path.normcase(str(current))
+    folder_navigation=include_containers and current.is_dir()
     if book_library:
         root=Path(book_library['root']).resolve()
         for value in book_library.get('paths',[]):
@@ -1261,12 +1262,13 @@ def neighboring_inputs(path,include_containers=False,book_library=None):
         entries=sorted(set(entries),key=lambda p:(natural_path_key(Path(p).relative_to(root)),p))
     else:
         allowed=INPUT_EXTENSIONS if include_containers else IMAGE_EXTENSIONS|TEXT_EXTENSIONS|{'.pdf'}
+        file_types=ARCHIVE_EXTENSIONS if folder_navigation else allowed
         with os.scandir(current.parent) as items:
             for item in items:
                 try:
                     if os.path.normcase(item.path)==current_key:
                         entries.append(str(current));found=True;continue
-                    if ((Path(item.name).suffix.lower() in allowed and item.is_file(follow_symlinks=False)) or
+                    if ((Path(item.name).suffix.lower() in file_types and item.is_file(follow_symlinks=False)) or
                             (include_containers and item.is_dir(follow_symlinks=False))):
                         entries.append(str(Path(item.path)))
                 except OSError:continue
@@ -8834,13 +8836,13 @@ class EndOfContainerOverlay(QWidget):
 
     def sync(self):
         if self.editor.dual_secondary:self.hide();return
-        editor=self.editor;owner=editor.owner;origin=editor.page.input_path or ''
+        editor=self.editor;owner=editor.owner
+        origin,containers,_library=owner.navigation_context()
         if origin!=self.origin:
             self.origin=origin
             self.container=bool(origin) and (Path(origin).suffix.lower() in ARCHIVE_EXTENSIONS or Path(origin).is_dir())
         index=editor.navigation_index()
         at_start=index==0 and editor.first_page_hint_uid==editor.page.uid
-        _origin,containers,_library=owner.navigation_context()
         visible=(not editor.closed and editor.mode=='pan' and containers and self.container and bool(owner.pages) and
                  (at_start or index==len(editor.navigation_pages())-1) and not owner.clear_pending and
                  not owner.book_focus and
@@ -14247,10 +14249,13 @@ class PreviewDialog(QDialog):
 
 class DragCancelGuard(QObject):
     """앱 안의 우클릭과 Windows OLE 드래그 중 우클릭을 모두 감시한다."""
-    def __init__(self, canvas):
+    def __init__(self, canvas, allow_external=False):
         super().__init__(canvas)
         self.canvas = canvas
         self.cancelled = False
+        self.allow_external = allow_external
+        self.external_requested = False
+        self.window_at = self.window_process = None
         self.cancel_api = QDrag.cancel
         self.key_state = None
         if sys.platform == 'win32':
@@ -14258,6 +14263,13 @@ class DragCancelGuard(QObject):
             self.key_state = ctypes.windll.user32.GetAsyncKeyState
             self.key_state.argtypes = [ctypes.c_int]
             self.key_state.restype = ctypes.c_short
+            from ctypes import wintypes
+            self.window_at = ctypes.windll.user32.WindowFromPoint
+            self.window_at.argtypes = [wintypes.POINT]
+            self.window_at.restype = wintypes.HWND
+            self.window_process = ctypes.windll.user32.GetWindowThreadProcessId
+            self.window_process.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+            self.window_process.restype = wintypes.DWORD
         self.timer = QTimer(self)
         self.timer.setInterval(15)
         self.timer.timeout.connect(self.poll)
@@ -14282,7 +14294,35 @@ class DragCancelGuard(QObject):
 
     def poll(self):
         if self.key_state is not None and self.key_state(0x02) & 0x8000:
-            self.cancel()
+            self.cancel();return
+        if self.key_state is not None and self.key_state(0x1B) & 0x8000:
+            self.cancel();return
+        if (self.allow_external and not self.cancelled and not self.external_requested and
+                self.left_pressed() and self.outside_application()):
+            # Start with IDs only. Windows can ask for URL data before a drop,
+            # so a lazy URI-list alone would still export during internal moves.
+            self.external_requested = True
+            self.cancel_api()
+
+    @staticmethod
+    def left_pressed():
+        if sys.platform=='win32':
+            import ctypes
+            return bool(ctypes.windll.user32.GetAsyncKeyState(0x01) & 0x8000)
+        return bool(QApplication.mouseButtons() & Qt.MouseButton.LeftButton)
+
+    def outside_application(self):
+        if self.window_at is not None:
+            import ctypes
+            from ctypes import wintypes
+            point=QCursor.pos();handle=self.window_at(wintypes.POINT(point.x(),point.y()))
+            if not handle:return False
+            process=wintypes.DWORD()
+            if not self.window_process(handle,ctypes.byref(process)):return False
+            return process.value!=os.getpid()
+        # QDrag.cancel is supported on Windows/X11. Other platforms keep the
+        # existing file drag rather than trying an unsupported handoff.
+        return QApplication.platformName()=='xcb' and QApplication.widgetAt(QCursor.pos()) is None
 
     def eventFilter(self, obj, event):
         if event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.NonClientAreaMouseButtonPress):
@@ -14678,66 +14718,87 @@ class PageCanvas(QAbstractScrollArea):
 
     def begin_drag(self):
         pages = self.selected_pages()
-        if not pages:
-            return
+        if not pages:return
         QToolTip.hideText()
-        # 표준 파일 URL 드래그라 탐색기가 실제 파일 사본을 받는다.
         directory = TEMP_ROOT / uuid.uuid4().hex
-        try:
-            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-            paths = export_pages(pages,directory,'PDF_사본_'+uuid.uuid4().hex[:10],self.owner.separate)
-        except ExportCancelled:return
-        except Exception as exc:
-            QMessageBox.warning(self,'PDF 사본 생성 실패',str(exc))
-            return
-        finally:
-            QApplication.restoreOverrideCursor()
-        mime = QMimeData()
-        mime.setData(MIME,json.dumps({'session':self.owner.session,'ids':[p.uid for p in pages]}).encode())
-        mime.setUrls([QUrl.fromLocalFile(str(p.resolve())) for p in paths])
-        mime.setData('application/x-qt-windows-mime;value="Preferred DropEffect"', b'\x01\x00\x00\x00')
-        drag = QDrag(self)
-        drag.setMimeData(mime)
-        drag.setPixmap(pdf_badge(total_page_count(pages)))
-        drag.setHotSpot(QPoint(22,20))
+        paths=[]
+        # Internal moves carry references only: no PDF reads, image decoding or
+        # temporary output. Switch to the standard file drag only outside this
+        # application, retaining Explorer / other-process Viewer copy support.
+        file_drag = sys.platform!='win32' and QApplication.platformName()!='xcb'
         self.dragging = {p.uid for p in pages}
         self.internal_drop = False
         self.cancelled_drag = False
         first = next(i for i,p in enumerate(self.owner.pages) if p.uid in self.dragging)
         self.slot = sum(p.uid not in self.dragging for p in self.owner.pages[:first])
         self.layout_pages()
-        self.cancel_guard = DragCancelGuard(self)
-        self.cancel_guard.start()
-        target = ExplorerTarget()
-        monitor = QTimer(self)
-        monitor.timeout.connect(target.sample)
-        monitor.start(75)
+        drag=None;target=None;result=Qt.DropAction.IgnoreAction
+        external_transition=False
         try:
-            result = drag.exec(Qt.DropAction.CopyAction,Qt.DropAction.CopyAction)
-            target.sample()
+            while True:
+                if file_drag and not paths:
+                    try:
+                        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+                        paths = export_pages(pages,directory,'PDF_사본_'+uuid.uuid4().hex[:10],self.owner.separate)
+                    except ExportCancelled:return
+                    except Exception as exc:
+                        QMessageBox.warning(self,'PDF 사본 생성 실패',str(exc));return
+                    finally:QApplication.restoreOverrideCursor()
+                    if external_transition and not DragCancelGuard.left_pressed():
+                        # Releasing during a slow external export must not start
+                        # a second native drag with no mouse button held.
+                        for path in paths:path.unlink(missing_ok=True)
+                        try:directory.rmdir()
+                        except OSError:pass
+                        QToolTip.showText(QCursor.pos(),'복사가 취소되었습니다. 바깥으로 끌 때는 사본 준비가 끝날 때까지 마우스를 누르고 있어 주세요.',self)
+                        return
+                mime = QMimeData()
+                mime.setData(MIME,json.dumps({'session':self.owner.session,'ids':[p.uid for p in pages]}).encode())
+                if file_drag:
+                    mime.setUrls([QUrl.fromLocalFile(str(p.resolve())) for p in paths])
+                    mime.setData('application/x-qt-windows-mime;value="Preferred DropEffect"', b'\x01\x00\x00\x00')
+                drag = QDrag(self)
+                drag.setMimeData(mime)
+                drag.setPixmap(pdf_badge(total_page_count(pages)))
+                drag.setHotSpot(QPoint(22,20))
+                self.cancel_guard = DragCancelGuard(self,allow_external=not file_drag)
+                self.cancel_guard.start()
+                # Shell/COM discovery is unnecessary for internal page moves.
+                target = ExplorerTarget() if file_drag else None
+                monitor = QTimer(self)
+                if target is not None:
+                    monitor.timeout.connect(target.sample);monitor.start(75)
+                try:
+                    result = drag.exec(Qt.DropAction.CopyAction,Qt.DropAction.CopyAction)
+                    if target is not None:target.sample()
+                finally:
+                    monitor.stop();monitor.deleteLater()
+                    guard=self.cancel_guard
+                    wants_external=guard.external_requested
+                    left_pressed=guard.left_pressed() if wants_external else False
+                    guard.stop();guard.deleteLater();self.cancel_guard=None
+                if wants_external and not self.cancelled_drag and not self.internal_drop:
+                    # The native drag has ended; it is now safe to prepare file
+                    # copies and restart it while the mouse is still held.
+                    drag.deleteLater();drag=None
+                    if not left_pressed:break
+                    external_transition=True;file_drag=True;continue
+                break
+            internal = self.internal_drop
+            if not self.cancelled_drag and not internal and result == Qt.DropAction.CopyAction:
+                self.owner.mark_exported(pages)
+            if (not self.cancelled_drag and not internal and drag is not None and drag.target() is None and
+                    target is not None and target.is_explorer and result == Qt.DropAction.CopyAction and self.owner.rename_after):
+                QTimer.singleShot(200,lambda: self.owner.rename_copies(paths,target,pages))
+            elif internal:
+                for path in paths:path.unlink(missing_ok=True)
+                try:directory.rmdir()
+                except OSError:pass
+            # Keep staged sources alive for asynchronous external consumers.
         finally:
-            monitor.stop();monitor.deleteLater()
-            self.cancel_guard.stop();self.cancel_guard.deleteLater();self.cancel_guard = None
-        internal = self.internal_drop
-        if not self.cancelled_drag and not internal and result == Qt.DropAction.CopyAction:
-            self.owner.mark_exported(pages)
-        self.dragging.clear(); self.slot = None; self.pointer = None
-        self.layout_pages()
-        self.pointer = None;self.external_hover = False
-        # Only a confirmed Explorer/Desktop target may ask for a copy name.
-        # Cross-process Viewer drops have no local QDrag.target(), so that alone
-        # must never be treated as an external folder.
-        if (not self.cancelled_drag and not internal and drag.target() is None and
-                target.is_explorer and result == Qt.DropAction.CopyAction and self.owner.rename_after):
-            QTimer.singleShot(200,lambda: self.owner.rename_copies(paths,target,pages))
-        elif internal:
-            for path in paths:
-                path.unlink(missing_ok=True)
-            try: directory.rmdir()
-            except OSError: pass
-        # Explorer can finish asynchronously, even after IgnoreAction. Keep the
-        # staged sources alive for external consumers instead of unlinking them.
-        drag.deleteLater()
+            self.dragging.clear();self.slot=None;self.pointer=None;self.external_hover=False
+            self.layout_pages()
+            if drag is not None:drag.deleteLater()
 
     def is_internal(self, mime):
         try:
@@ -16165,8 +16226,8 @@ class Window(QMainWindow):
         others = [p for p in self.pages if p.uid not in selected]
         at = max(0, min(slot, len(others)))
         result = others[:at]+moving+others[at:]
-        if result != self.pages:
-            self.snapshot();self.pages = result
+        if result == self.pages:return
+        self.snapshot();self.pages = result
         self.refresh()
 
     def remove_selected(self):
@@ -16279,7 +16340,11 @@ class Window(QMainWindow):
         page=editor.page if editor is not None and not editor.closed else next(
             (p for p in self.pages if p.uid in self.canvas.selected),self.pages[0] if self.pages else None)
         if page is not None:
-            if page.input_path:return page.input_path
+            if page.input_path:
+                origin=Path(page.input_path)
+                if origin.suffix.lower() in IMAGE_EXTENSIONS and not origin.is_dir():
+                    return str(origin.parent)
+                return page.input_path
             if is_image_source(page.path):return image_source_info(page.path)['file']
             return page.label_path
         return self.pending_import[1] if self.pending_import else self.browse_path
@@ -16288,7 +16353,7 @@ class Window(QMainWindow):
         origin=self.navigation_origin();library=self.browse_books
         if library and origin and any(os.path.normcase(path)==os.path.normcase(origin) for path in library.get('paths',[])):
             return origin,True,library
-        return origin,self.browse_containers,None
+        return origin,self.browse_containers or bool(origin and Path(origin).is_dir()),None
 
     def navigation_context_key(self):
         origin,containers,library=self.navigation_context()

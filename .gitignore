@@ -8,3 +8,10 @@ credentials.json
 *.log
 build/
 dist/
+
+
+# GitHub Actions/local build outputs
+build/
+dist/
+__pycache__/
+*.pyc
