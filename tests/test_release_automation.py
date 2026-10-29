@@ -18,6 +18,8 @@ import publish_release as publisher
 import build_windows_release as windows_builder
 from build_common import BuildError, atomic_json
 from github_release import load_prepared_release, release_notes
+from build_common import inspect_source
+from build_runner import strict_report
 
 
 class FakeResponse(io.BytesIO):
@@ -25,6 +27,29 @@ class FakeResponse(io.BytesIO):
 
 
 class TestConfigAndCompliance(unittest.TestCase):
+    def test_full_current_source_check_report_is_accepted(self):
+        count=inspect_source(ROOT/'pdf_page_dragger.py')['required_check_count']
+        self.assertEqual(count,25)
+        report={'schema':1,'nonce':'test','ok':True,'completed':True,'active_check':None,
+                'frozen':False,'platform':'win32','required_check_count':count,
+                'checks':[{'name':str(i),'status':'passed'} for i in range(count)]}
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'checks.json';atomic_json(path,report)
+            self.assertEqual(len(strict_report(path,'test',False,0,required_count=count)['checks']),count)
+            # A self-consistent older report still cannot omit the new check.
+            report['required_check_count']-=1;report['checks'].pop();atomic_json(path,report)
+            with self.assertRaises(BuildError):strict_report(path,'test',False,0,required_count=count)
+    def test_incomplete_or_failed_current_check_report_is_rejected(self):
+        count=inspect_source(ROOT/'pdf_page_dragger.py')['required_check_count']
+        report={'schema':1,'nonce':'test','ok':True,'completed':True,'active_check':None,
+                'frozen':False,'platform':'win32','required_check_count':count,
+                'checks':[{'name':str(i),'status':'passed'} for i in range(count)]}
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'checks.json'
+            incomplete=copy.deepcopy(report);incomplete['checks'].pop();atomic_json(path,incomplete)
+            with self.assertRaises(RuntimeError):strict_report(path,'test',False,0,required_count=count)
+            failed=copy.deepcopy(report);failed['checks'][-1]['status']='failed';atomic_json(path,failed)
+            with self.assertRaises(RuntimeError):strict_report(path,'test',False,0,required_count=count)
     def test_version_matches_real_source_and_publication_is_explicit(self):
         config=ci_common.release_config(ROOT)
         self.assertEqual(config['version'], '3.13.45'); self.assertIs(type(config['publish']),bool)

@@ -728,7 +728,7 @@ def verify_viewer_report(path: Path, nonce: str, frozen: bool, returncode: int,
     if result.get('nonce') != nonce: reasons.append('이번 실행과 보고서 식별값이 다릅니다. 오래된 보고서를 사용할 수 없습니다.')
     if result.get('frozen') is not frozen: reasons.append('소스 검사 / EXE 검사 구분이 다릅니다.')
     required = result.get('required_check_count')
-    if required not in range(14, 25) or len(checks) != required:
+    if required not in range(14, 26) or len(checks) != required:
         reasons.append(f'검사 수 미완료: 기록 {len(checks)}개 / 예정 {required}개')
     if result.get('active_check'): reasons.append('마지막 진행 항목: ' + str(result['active_check']))
     if result.get('completed') is False: reasons.append('전체 검사 완료 기록이 없습니다.')
