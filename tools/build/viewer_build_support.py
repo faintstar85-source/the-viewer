@@ -175,7 +175,7 @@ def run_checks(namespace, report_path, nonce):
         'viewer_version': namespace.get('APP_VERSION'),
         'python': sys.version.split()[0], 'platform': sys.platform,
         'frozen': bool(getattr(sys, 'frozen', False)), 'checks': [], 'versions': {},
-        'required_check_count': 14 + int('printing_package_selftest' in namespace) + int('vector_package_selftest' in namespace) + 2*int('document_package_selftest' in namespace) + int('bundled_engines_package_selftest' in namespace) + int('text_package_selftest' in namespace) + int('compare_page_pair' in namespace) + int('editing_ui_package_selftest' in namespace) + int('type3_edit_package_selftest' in namespace) + int('short_text_edit_package_selftest' in namespace),
+        'required_check_count': 14 + int('printing_package_selftest' in namespace) + int('vector_package_selftest' in namespace) + 2*int('document_package_selftest' in namespace) + int('bundled_engines_package_selftest' in namespace) + int('text_package_selftest' in namespace) + int('compare_page_pair' in namespace) + int('editing_ui_package_selftest' in namespace) + int('type3_edit_package_selftest' in namespace) + int('short_text_edit_package_selftest' in namespace) + int('photo_navigation_package_selftest' in namespace),
         'scope': 'generated local samples; no DeepL API request or user settings access',
     }
 
@@ -244,6 +244,8 @@ def run_checks(namespace, report_path, nonce):
             check('문서 글꼴 우선순위·편집 버튼·한글/번역 버튼 표시',namespace['editing_ui_package_selftest'])
         if 'short_text_edit_package_selftest' in namespace:
             check('짧은 숫자 선택·입력·원본 굵기',namespace['short_text_edit_package_selftest'])
+        if 'photo_navigation_package_selftest' in namespace:
+            check('사진 전용 탐색·실제 작업 프로세스·하단 안내',namespace['photo_navigation_package_selftest'])
 
         def images():
             from PIL import Image

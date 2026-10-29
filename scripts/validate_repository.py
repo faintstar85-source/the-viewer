@@ -22,6 +22,11 @@ def validate_backend_copies(source: str) -> None:
     if len(calls)!=1:raise ValueError('The independently bundled PDF backend could not be identified')
     capsule=zlib.decompress(base64.b85decode(ast.literal_eval(calls[0].args[0]))).decode('utf-8')
     compile(capsule,'PDF compatibility capsule','exec');inner=ast.parse(capsule)
+    def navigation(module):
+        return ast.dump(next(n for n in module.body if isinstance(n,ast.FunctionDef) and
+                             n.name=='neighboring_inputs'),include_attributes=False)
+    if navigation(tree)!=navigation(inner):
+        raise ValueError('Main and independently bundled photo navigation helpers differ')
     for name in ('_VIEWER_PDF_ENGINE_SOURCE','_VIEWER_PDF_EDIT_SOURCE'):
         compile(embedded(inner,name),name+':compat','exec')
     if ast.dump(ast.parse(embedded(tree,'_VIEWER_PDF_ENGINE_SOURCE')),include_attributes=False)!=ast.dump(ast.parse(embedded(inner,'_VIEWER_PDF_ENGINE_SOURCE')),include_attributes=False):

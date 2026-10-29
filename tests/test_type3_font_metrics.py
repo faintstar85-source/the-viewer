@@ -57,9 +57,10 @@ class TestType3FontMetrics(unittest.TestCase):
         fixed='def _font_code_size(font):\n return 1\ndef _font_width_table(font):\n return 1,{},0.\n'
         stale=fixed.replace('return 1,{},0.',"raise ValueError('Type3 unsupported')")
         def application(inner):
-            capsule='_VIEWER_PDF_ENGINE_SOURCE = ""\n_VIEWER_PDF_EDIT_SOURCE = '+repr(inner)+'\n'
+            navigation='def neighboring_inputs(path):\n return {}\n'
+            capsule='_VIEWER_PDF_ENGINE_SOURCE = ""\n_VIEWER_PDF_EDIT_SOURCE = '+repr(inner)+'\n'+navigation
             encoded=base64.b85encode(zlib.compress(capsule.encode())).decode()
-            return '_VIEWER_PDF_ENGINE_SOURCE = ""\n_VIEWER_PDF_EDIT_SOURCE = '+repr(fixed)+'\ndef _viewer_fast_pdf_worker():\n return base64.b85decode('+repr(encoded)+')\n'
+            return '_VIEWER_PDF_ENGINE_SOURCE = ""\n_VIEWER_PDF_EDIT_SOURCE = '+repr(fixed)+'\n'+navigation+'def _viewer_fast_pdf_worker():\n return base64.b85decode('+repr(encoded)+')\n'
         validate_backend_copies(application(fixed))
         with self.assertRaises(ValueError):validate_backend_copies(application(stale))
 

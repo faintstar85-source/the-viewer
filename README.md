@@ -6,7 +6,7 @@ Windows용 PDF·사진 뷰어입니다. 여러 자료의 페이지를 정리하�
 
 ## 문서 기준
 
-이 안내의 현재 소스 기준은 **The Viewer v3.13.44**입니다. 실제 공개된 설치 파일과 배포 버전은 [GitHub Releases](https://github.com/faintstar85-source/the-viewer/releases)에서 확인하세요.
+이 안내의 현재 소스 기준은 **The Viewer v3.13.45**입니다. 실제 공개된 설치 파일과 배포 버전은 [GitHub Releases](https://github.com/faintstar85-source/the-viewer/releases)에서 확인하세요.
 
 일반 사용자는 릴리스에 첨부된 설치 EXE를 사용합니다. 설치 배포본은 Python을 별도로 설치하지 않고 실행할 수 있습니다.
 
@@ -19,6 +19,14 @@ Windows용 PDF·사진 뷰어입니다. 여러 자료의 페이지를 정리하�
 - 사용자는 기존 **정 → 업데이트**에서 새 설치 파일을 확인합니다.
 
 [자동 빌드·배포 상태](https://github.com/faintstar85-source/the-viewer/actions/workflows/release.yml) · [제작자 안내](docs/BUILD_AND_GITHUB.md)
+
+## v3.13.45 변경사항
+
+- 사진 한 장을 열면 화살표로 같은 폴더의 사진만 이동합니다. 압축파일·문서·하위 폴더는 제외합니다.
+- 사진을 가리던 전환 패널을 숨기고, 앞뒤 사진이 없으면 현재 사진을 유지하며 하단에 짧게 안내합니다.
+- 실제 작업 프로세스와 하단 안내 검사를 Windows 패키징에 추가했습니다.
+
+[이번 버전 수정 내역](releases/RELEASE_NOTES_v3.13.45.md)
 
 ## v3.13.44 변경사항
 
