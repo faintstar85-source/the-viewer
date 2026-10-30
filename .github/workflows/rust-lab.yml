@@ -14,7 +14,7 @@ concurrency:
 jobs:
   windows-compare:
     runs-on: windows-2022
-    timeout-minutes: 25
+    timeout-minutes: 35
     env:
       PYTHONUTF8: '1'
       PYTHONIOENCODING: utf-8
@@ -55,6 +55,8 @@ jobs:
         run: python rust-lab/bench.py --rust rust-lab/target/release/viewer-rust-worker.exe --out rust-lab/results/windows-benchmark.json --repetitions 7
       - name: Exercise the original UI with the Rust worker
         run: python rust-lab/check_ui.py --rust rust-lab/target/release/viewer-rust-worker.exe --out rust-lab/results/windows-ui
+      - name: Stress one window with 10 and 20 PDF files in both implementations
+        run: python rust-lab/stress.py --rust rust-lab/target/release/viewer-rust-worker.exe --out rust-lab/results/windows-stress --cycles 10 --min-seconds 120
       - name: Keep executable, trial launcher and measured results
         if: always()
         uses: actions/upload-artifact@v4
@@ -65,11 +67,15 @@ jobs:
             rust-lab/results/*.json
             rust-lab/results/windows-ui/*.json
             rust-lab/results/windows-ui/*.txt
+            rust-lab/results/windows-stress/**/*.json
+            rust-lab/results/windows-stress/**/*.txt
             rust-lab/launch.py
             rust-lab/bridge.py
             rust-lab/bench.py
             rust-lab/test_protocol.py
             rust-lab/check_ui.py
+            rust-lab/stress.py
+            rust-lab/stress_ui_case.py
             rust-lab/requirements-benchmark.txt
             rust-lab/Cargo.toml
             rust-lab/Cargo.lock

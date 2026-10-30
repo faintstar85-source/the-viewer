@@ -48,6 +48,18 @@ python rust-lab/bench.py --rust rust-lab/target/release/viewer-rust-worker.exe -
 
 Linux에서는 바이너리 이름의 `.exe`를 빼고 `QT_QPA_PLATFORM=offscreen`으로 GUI 검사를 수행합니다.
 
+## PDF 10개·20개 스트레스 시험
+
+`stress.py`는 합성 PDF 20개(각 10쪽, 글·표와 스캔형 각 절반)를 생성합니다. 한 프로그램 창에 10개/20개를 모두 불러온 뒤 각 파일의 첫·중간·마지막 쪽, 썸네일, 듀얼뷰를 확인하고 닫기·재열기를 10회 반복합니다. 각 조건을 최소 120초 관찰하며, Python 10개 → Rust 10개 → Rust 20개 → Python 20개 순서로 새 프로그램 프로세스에서 실행합니다.
+
+```powershell
+python rust-lab/stress.py --rust rust-lab/target/release/viewer-rust-worker.exe --out rust-lab/results/my-stress --cycles 10 --min-seconds 120
+```
+
+GUI와 자식 프로세스 전체의 RSS, Windows private bytes·핸들 수를 100ms 간격으로 기록합니다. 캐시가 채워진 뒤의 동일 단계와 파일 해제 신호 후 2초 대기 단계를 비교하며, 종료 후 남은 자식 프로세스는 정리 전에 실패로 기록합니다. 오류·타임아웃·원본 변경도 실패입니다. 원자료는 각 실행의 artifact 내 `rust-lab/results/windows-stress/`에서 확인합니다.
+
+20개 창이나 20개 동시 렌더링 시험은 아닙니다. 메모리 증가만으로 누수라고 판정하지 않으며, 통과해도 하루 종일 사용하거나 모든 사용자 문서에서 충돌이 없다는 뜻은 아닙니다. 강제 충돌·저메모리 주입은 이 시험에 포함하지 않습니다.
+
 ## 비교 기준
 
 - baseline도 원래 UI가 사용하는 `worker_launch()`의 marshal 캐시 실행 경로를 사용합니다.
