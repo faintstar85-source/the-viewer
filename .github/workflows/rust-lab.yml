@@ -19,6 +19,10 @@ jobs:
       PYTHONUTF8: '1'
       PYTHONIOENCODING: utf-8
       QT_QPA_PLATFORM: offscreen
+      # Avoid the hosted runner's RUNNER~1 temp alias: original tests compare
+      # tempfile paths with resolved paths. Both workers use this same root.
+      TEMP: ${{ runner.temp }}
+      TMP: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v6
         with:
