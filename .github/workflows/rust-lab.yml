@@ -19,11 +19,15 @@ jobs:
       PYTHONUTF8: '1'
       PYTHONIOENCODING: utf-8
       QT_QPA_PLATFORM: offscreen
-      # Avoid the hosted runner's RUNNER~1 temp alias: original tests compare
-      # tempfile paths with resolved paths. Both workers use this same root.
-      TEMP: ${{ runner.temp }}
-      TMP: ${{ runner.temp }}
     steps:
+      - name: Use canonical temporary paths for both implementations
+        shell: pwsh
+        run: |
+          $trialTemp = (Get-Item -LiteralPath $env:RUNNER_TEMP).FullName
+          "TEMP=$trialTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TMP=$trialTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Preserve source bytes for the pinned baseline hash
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
