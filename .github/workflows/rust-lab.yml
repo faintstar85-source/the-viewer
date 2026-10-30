@@ -1,0 +1,74 @@
+name: Rust reader experiment - no release
+on:
+  push:
+    branches: [experiment/rust-backend-20261030]
+    paths:
+      - rust-lab/**
+      - .github/workflows/rust-lab.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: viewer-rust-lab-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  windows-compare:
+    runs-on: windows-2022
+    timeout-minutes: 25
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          architecture: x64
+      - name: Install the baseline reader dependencies
+        run: python -m pip install -r rust-lab/requirements-benchmark.txt
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - name: Build the experimental worker
+        working-directory: rust-lab
+        run: cargo +1.99.1 build --release --locked
+      - name: Verify Rust FFI layout
+        working-directory: rust-lab
+        run: cargo +1.99.1 test --locked
+      - name: Validate the original application source
+        run: python scripts/validate_repository.py
+      - name: Run the original application tests
+        run: python -m unittest discover -s tests -v
+      - name: Verify worker protocol and output parity
+        run: python rust-lab/test_protocol.py --rust rust-lab/target/release/viewer-rust-worker.exe --out rust-lab/results/windows-protocol.json
+      - name: Compare workers using the same PDFium DLL and inputs
+        run: python rust-lab/bench.py --rust rust-lab/target/release/viewer-rust-worker.exe --out rust-lab/results/windows-benchmark.json --repetitions 7
+      - name: Exercise the original UI with the Rust worker
+        run: python rust-lab/check_ui.py --rust rust-lab/target/release/viewer-rust-worker.exe --out rust-lab/results/windows-ui
+      - name: Keep executable, trial launcher and measured results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: viewer-rust-lab-windows-${{ github.sha }}
+          path: |
+            rust-lab/target/release/viewer-rust-worker.exe
+            rust-lab/results/*.json
+            rust-lab/results/windows-ui/*.json
+            rust-lab/results/windows-ui/*.txt
+            rust-lab/launch.py
+            rust-lab/bridge.py
+            rust-lab/bench.py
+            rust-lab/test_protocol.py
+            rust-lab/check_ui.py
+            rust-lab/requirements-benchmark.txt
+            rust-lab/Cargo.toml
+            rust-lab/Cargo.lock
+            rust-lab/src/main.rs
+            rust-lab/START_RUST_TRIAL.bat
+            rust-lab/README.md
+            pdf_page_dragger.py
+            scripts/check_photo_navigation_ui.py
+          if-no-files-found: error
+          retention-days: 30

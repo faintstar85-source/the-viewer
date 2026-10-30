@@ -1,0 +1,7 @@
+# Subset of the unchanged v3.13.45 requirements used for this reader experiment.
+PySide6==6.11.1
+pypdfium2==5.14.0
+reportlab==4.4.9
+pypdf[crypto]==6.10.0
+Pillow==12.2.0
+psutil==7.2.2
