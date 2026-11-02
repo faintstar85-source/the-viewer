@@ -3,6 +3,6 @@
   "version": "3.13.46",
   "source": "pdf_page_dragger.py",
   "notes": "releases/RELEASE_NOTES_v3.13.46.md",
-  "publish": false,
+  "publish": true,
   "prerelease": false
 }
