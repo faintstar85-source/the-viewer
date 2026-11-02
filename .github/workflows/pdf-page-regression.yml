@@ -55,6 +55,10 @@ jobs:
         run: python scripts/prepare_compliance.py
       - name: Build and check test installer
         run: python -u scripts/build_windows_release.py
+      - name: Check PDF export in the packaged executable
+        run: |
+          python -m pip install pypdf==6.10.0
+          python scripts/check_pdf_export_exe.py
       - name: Keep test installer and verification
         uses: actions/upload-artifact@v4
         with:
