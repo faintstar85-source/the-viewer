@@ -6,7 +6,7 @@ Windows용 PDF·사진 뷰어입니다. 여러 자료의 페이지를 정리하�
 
 ## 문서 기준
 
-이 안내의 현재 소스 기준은 **The Viewer v3.13.45**입니다. 실제 공개된 설치 파일과 배포 버전은 [GitHub Releases](https://github.com/faintstar85-source/the-viewer/releases)에서 확인하세요.
+이 안내의 현재 소스 기준은 **The Viewer v3.13.46**입니다. 실제 공개된 설치 파일과 배포 버전은 [GitHub Releases](https://github.com/faintstar85-source/the-viewer/releases)에서 확인하세요.
 
 일반 사용자는 릴리스에 첨부된 설치 EXE를 사용합니다. 설치 배포본은 Python을 별도로 설치하지 않고 실행할 수 있습니다.
 
@@ -19,6 +19,14 @@ Windows용 PDF·사진 뷰어입니다. 여러 자료의 페이지를 정리하�
 - 사용자는 기존 **정 → 업데이트**에서 새 설치 파일을 확인합니다.
 
 [자동 빌드·배포 상태](https://github.com/faintstar85-source/the-viewer/actions/workflows/release.yml) · [제작자 안내](docs/BUILD_AND_GITHUB.md)
+
+## v3.13.46 변경사항
+
+- 대용량 PDF에서 선택한 쪽을 사본으로 만들 때 원본 전체를 쪽마다 다시 복사하지 않도록 개선했습니다.
+- PDF 사본 생성은 별도 프로세스에서 진행하며, 진행 상태와 취소를 제공합니다.
+- 선택한 여러 쪽의 순서, 개별 사본, 회전·주석 및 실패 시 파일 보존을 검사합니다.
+
+[이번 버전 수정 내역](releases/RELEASE_NOTES_v3.13.46.md)
 
 ## v3.13.45 변경사항
 

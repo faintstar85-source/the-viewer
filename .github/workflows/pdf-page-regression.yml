@@ -1,0 +1,79 @@
+name: Windows PDF page regression
+
+on:
+  pull_request:
+    paths:
+      - pdf_page_dragger.py
+      - tests/test_large_pdf_operations.py
+      - .github/workflows/pdf-page-regression.yml
+  push:
+    branches: [main]
+    paths:
+      - pdf_page_dragger.py
+      - tests/test_large_pdf_operations.py
+      - .github/workflows/pdf-page-regression.yml
+
+permissions:
+  contents: read
+
+jobs:
+  page-operations:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          architecture: x64
+      - name: Install PDF and Qt runtime dependencies
+        run: python -m pip install PySide6==6.11.1 pypdf==6.10.0 pypdfium2==5.14.0 Pillow==12.2.0
+      - name: Check page copies, selection, undo and failure handling
+        run: python -m unittest discover -s tests -p test_large_pdf_operations.py -v
+
+  windows-test-package:
+    if: github.event_name == 'pull_request'
+    needs: page-operations
+    runs-on: windows-2022
+    timeout-minutes: 90
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
+      INPUT_PUBLISH: 'false'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          architecture: x64
+      - name: Prepare pinned source archives and notices
+        run: python scripts/prepare_compliance.py
+      - name: Build and check test installer
+        run: python -u scripts/build_windows_release.py
+      - name: Check PDF export in the packaged executable
+        run: |
+          python -m pip install pypdf==6.10.0
+          python scripts/check_pdf_export_exe.py
+      - name: Keep test installer and verification
+        uses: actions/upload-artifact@v4
+        with:
+          name: viewer-test-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Keep build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: viewer-test-diagnostics-${{ github.sha }}
+          path: |
+            build/windows-run/*.json
+            build/windows-run/*.txt
+            build/windows-run/logs/
+          if-no-files-found: ignore
+          retention-days: 14
