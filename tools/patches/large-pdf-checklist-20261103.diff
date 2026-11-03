@@ -1,0 +1,506 @@
+diff --git a/.github/workflows/pdf-page-regression.yml b/.github/workflows/pdf-page-regression.yml
+index 103475a..3581a66 100644
+--- a/.github/workflows/pdf-page-regression.yml
++++ b/.github/workflows/pdf-page-regression.yml
+@@ -5,12 +5,18 @@ on:
+     paths:
+       - pdf_page_dragger.py
+       - tests/test_large_pdf_operations.py
++      - tests/test_editable_copy_bounded.py
++      - tests/test_checklist_cell_edit.py
++      - scripts/check_pdf_edit_exe.py
+       - .github/workflows/pdf-page-regression.yml
+   push:
+     branches: [main]
+     paths:
+       - pdf_page_dragger.py
+       - tests/test_large_pdf_operations.py
++      - tests/test_editable_copy_bounded.py
++      - tests/test_checklist_cell_edit.py
++      - scripts/check_pdf_edit_exe.py
+       - .github/workflows/pdf-page-regression.yml
+ 
+ permissions:
+@@ -30,9 +36,13 @@ jobs:
+           python-version: '3.13'
+           architecture: x64
+       - name: Install PDF and Qt runtime dependencies
+-        run: python -m pip install PySide6==6.11.1 pypdf==6.10.0 pypdfium2==5.14.0 Pillow==12.2.0
++        run: python -m pip install PySide6==6.11.1 pypdf==6.10.0 pypdfium2==5.14.0 Pillow==12.2.0 reportlab==4.4.9
+       - name: Check page copies, selection, undo and failure handling
+         run: python -m unittest discover -s tests -p test_large_pdf_operations.py -v
++      - name: Check single-page extraction and visual fidelity
++        run: python -m unittest discover -s tests -p test_editable_copy_bounded.py -v
++      - name: Check individually editable checklist symbols
++        run: python -m unittest discover -s tests -p test_checklist_cell_edit.py -v
+ 
+   windows-test-package:
+     if: github.event_name == 'pull_request'
+@@ -57,8 +67,10 @@ jobs:
+         run: python -u scripts/build_windows_release.py
+       - name: Check PDF export in the packaged executable
+         run: |
+-          python -m pip install pypdf==6.10.0
++          python -m pip install pypdf==6.10.0 reportlab==4.4.9
+           python scripts/check_pdf_export_exe.py
++      - name: Check large PDF edit worker in the packaged executable
++        run: python scripts/check_pdf_edit_exe.py
+       - name: Keep test installer and verification
+         uses: actions/upload-artifact@v4
+         with:
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 6baf7d7..f342b6b 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,13 @@
+ # 수정 기록
+ 
++## 3.13.47
++
++- 대용량 PDF 편집 시 원본 전체를 직렬화하지 않고 선택한 쪽만 복사합니다.
++- 한 행에 묶인 체크리스트 기호를 각각 선택할 수 있게 개선했습니다.
++- 실제 Windows 화면에서의 마우스 조작 검증은 별도로 필요합니다.
++
++[이번 버전 수정 내역](releases/RELEASE_NOTES_v3.13.47.md)
++
+ ## 3.13.46
+ 
+ - 대용량 PDF 사본 생성 시 동일한 원본의 반복 직렬화를 줄였습니다.
+diff --git a/README.md b/README.md
+index bf59d05..ca47914 100644
+--- a/README.md
++++ b/README.md
+@@ -6,7 +6,7 @@ Windows용 PDF·사진 뷰어입니다. 여러 자료의 페이지를 정리하
+ 
+ ## 문서 기준
+ 
+-이 안내의 현재 소스 기준은 **The Viewer v3.13.46**입니다. 실제 공개된 설치 파일과 배포 버전은 [GitHub Releases](https://github.com/faintstar85-source/the-viewer/releases)에서 확인하세요.
++이 안내의 현재 소스 기준은 **The Viewer v3.13.47**입니다. 실제 공개된 설치 파일과 배포 버전은 [GitHub Releases](https://github.com/faintstar85-source/the-viewer/releases)에서 확인하세요.
+ 
+ 일반 사용자는 릴리스에 첨부된 설치 EXE를 사용합니다. 설치 배포본은 Python을 별도로 설치하지 않고 실행할 수 있습니다.
+ 
+@@ -20,6 +20,14 @@ Windows용 PDF·사진 뷰어입니다. 여러 자료의 페이지를 정리하
+ 
+ [자동 빌드·배포 상태](https://github.com/faintstar85-source/the-viewer/actions/workflows/release.yml) · [제작자 안내](docs/BUILD_AND_GITHUB.md)
+ 
++## v3.13.47 변경사항
++
++- 대용량 PDF 편집 시 선택한 쪽만 복사하도록 메모리 사용을 줄였습니다.
++- 체크리스트처럼 간격이 넓게 배치된 문자들을 각각 선택해 편집할 수 있도록 개선했습니다.
++- Windows 사용자 화면에서 실제 마우스 조작은 별도 확인이 필요합니다.
++
++[이번 버전 수정 내역](releases/RELEASE_NOTES_v3.13.47.md)
++
+ ## v3.13.46 변경사항
+ 
+ - 대용량 PDF에서 선택한 쪽을 사본으로 만들 때 원본 전체를 쪽마다 다시 복사하지 않도록 개선했습니다.
+diff --git a/pdf_page_dragger.py b/pdf_page_dragger.py
+index f8601fb..6258128 100644
+--- a/pdf_page_dragger.py
++++ b/pdf_page_dragger.py
+@@ -290,7 +290,7 @@ from collections import OrderedDict
+ from contextlib import contextmanager
+ 
+ APP_NAME = 'The Viewer (정)'
+-APP_VERSION = '3.13.46'
++APP_VERSION = '3.13.47'
+ ENGINE_PROFILE = 'permissive-pdf'
+ OFFICE_BUNDLED = False
+ BLOG_URL = 'https://blog.naver.com/faintstar'
+@@ -1542,10 +1542,22 @@ def editable_copy(path, number, normalize_rotation=True):
+     """페이지별 불변 작업 사본. 화면 좌표와 PDF 편집 좌표를 일치시킨다."""
+     import viewer_pdf_engine
+     if is_image_source(path):return image_page_document(path,number)
+-    result = viewer_pdf_engine.open()
++    # Read and clone only the requested page. Opening the source through our
++    # editing Document first clones and serializes *every* page, causing large
++    # memory spikes for a single edit in long reports.
++    from pypdf import PdfReader, PdfWriter
++    with open(path, 'rb') as source:
++        reader = PdfReader(source, strict=False)
++        if reader.is_encrypted and not reader.decrypt(''):
++            raise ValueError('암호가 설정된 PDF입니다.')
++        if not 0 <= number < len(reader.pages):
++            raise IndexError('Source page range out of bounds')
++        writer = PdfWriter()
++        writer.add_page(reader.pages[number])
++        data = io.BytesIO()
++        writer.write(data)
++    result = viewer_pdf_engine.open(stream=data.getvalue(), filetype='pdf')
+     try:
+-        with viewer_pdf_engine.open(path) as source:
+-            result.insert_pdf(source, from_page=number, to_page=number)
+         if normalize_rotation:result[0].remove_rotation()
+         return result
+     except Exception:
+@@ -2028,6 +2040,33 @@ def apply_edit_batch(path,number,operation,output):
+ 
+ 
+ 
++def split_spaced_text_span(span, rotation=0):
++    """Separate widely spaced text in a single PDF text object into edit targets.
++
++    Some PDF generators place a complete table row, including all checklist
++    values, in one TJ operation.  Split at genuinely large gaps between visible
++    glyphs; keep ordinary word spacing and preserve the original glyph data.
++    """
++    chars=span['chars']
++    if rotation or not chars:return [chars]
++    groups=[];start=0;previous=None
++    for index,char in enumerate(chars):
++        if not char['c'].strip():continue
++        if previous is not None:
++            gap=char['bbox'][0]-previous['bbox'][2]
++            if gap>max(8.,float(span['size'])*1.5):
++                part=chars[start:index]
++                while part and not part[-1]['c'].strip():part=part[:-1]
++                if part:groups.append(part)
++                start=index
++        previous=char
++    if not groups:return [chars]
++    part=chars[start:]
++    while part and not part[-1]['c'].strip():part=part[:-1]
++    if part:groups.append(part)
++    return groups
++
++
+ def inspect_edit_page(path, number, tables=False, images=False):
+     import viewer_pdf_engine
+     viewer_pdf_engine.TOOLS.set_small_glyph_heights(True)
+@@ -2044,14 +2083,19 @@ def inspect_edit_page(path, number, tables=False, images=False):
+                 if abs((angle - rotation + 180) % 360 - 180) > 1:
+                     continue  # 임의 각도 글자는 영역 도구로 보정한다.
+                 for span in line.get('spans', []):
+-                    text=''.join(char['c'] for char in span['chars'])
+-                    if text.strip():
++                    for chars in split_spaced_text_span(span,rotation):
++                        text=''.join(char['c'] for char in chars)
++                        if not text.strip():continue
+                         glyphs=[{'text':char['c'],'rect':list(char['bbox']),'origin':list(char['origin'])}
+-                                for char in span['chars'] if char['c'].strip()]
+-                        spans.append({'rect': list(span['bbox']), 'text': text,'source_glyphs':glyphs,
++                                for char in chars if char['c'].strip()]
++                        whole=chars is span['chars']
++                        box=list(span['bbox']) if whole else [min(g['rect'][0] for g in glyphs),min(g['rect'][1] for g in glyphs),
++                             max(g['rect'][2] for g in glyphs),max(g['rect'][3] for g in glyphs)]
++                        spans.append({'rect':box, 'text': text,'source_glyphs':glyphs,
+                                       'size': span['size'], 'color': '#%06x' % span['color'],
+                                       'bold': bool(span['flags'] & 16), 'font':span['font'], 'rotate': rotation,
+-                                      'origin':list(span.get('origin',span['bbox'][:2])), 'family':span.get('family',span['font'])})
++                                      'origin':list(span.get('origin',span['bbox'][:2]) if whole else chars[0]['origin']),
++                                      'family':span.get('family',span['font'])})
+         cells = []
+         if tables:
+             seen = set()
+@@ -2553,15 +2597,15 @@ def pdf_worker():
+                         if request['op']=='sibling' else {'neighbors':neighbors})
+                 sys.stdout.buffer.write((json.dumps({'id':request['id'],'ok':True,**result},ensure_ascii=True)+'\n').encode('ascii'))
+                 sys.stdout.buffer.flush();continue
+-            if is_image_source(path):
++            if request['op'] in ('editinfo','edit'):
+                 payload=request.get('payload',{})
+                 if request['op']=='editinfo':
+                     result={'info':inspect_edit_page(path,request['page'],payload.get('tables',False),payload.get('images',False))}
+-                elif request['op']=='edit':
++                else:
+                     result={'path':apply_page_edit(path,request['page'],payload['operation'],payload['output'])}
+-                else:raise ValueError('그림 미리보기는 그림 엔진에서 처리해야 합니다.')
+                 sys.stdout.buffer.write((json.dumps({'id':request['id'],'ok':True,**result},ensure_ascii=True)+'\n').encode('ascii'))
+                 sys.stdout.buffer.flush();continue
++            if is_image_source(path):raise ValueError('그림 미리보기는 그림 엔진에서 처리해야 합니다.')
+             if path not in documents:
+                 doc = viewer_pdf_engine.open(path)
+                 if not doc.is_pdf or doc.needs_pass:
+@@ -2572,13 +2616,7 @@ def pdf_worker():
+             while len(documents) > 4:
+                 documents.popitem(last=False)[1].close()
+             doc = documents[path]
+-            if request['op'] == 'editinfo':
+-                payload = request.get('payload', {})
+-                result = {'info': inspect_edit_page(path, request['page'], payload.get('tables', False), payload.get('images', False))}
+-            elif request['op'] == 'edit':
+-                payload = request['payload']
+-                result = {'path': apply_page_edit(path, request['page'], payload['operation'], payload['output'])}
+-            elif request['op'] == 'inspect':
++            if request['op'] == 'inspect':
+                 result = {'count': len(doc)}
+             else:
+                 page = doc[request['page']]
+diff --git a/release.json b/release.json
+index 26fabe0..4b1c52e 100644
+--- a/release.json
++++ b/release.json
+@@ -1,8 +1,8 @@
+ {
+   "schema": 1,
+-  "version": "3.13.46",
++  "version": "3.13.47",
+   "source": "pdf_page_dragger.py",
+-  "notes": "releases/RELEASE_NOTES_v3.13.46.md",
+-  "publish": true,
+-  "prerelease": false
++  "notes": "releases/RELEASE_NOTES_v3.13.47.md",
++  "publish": false,
++  "prerelease": true
+ }
+diff --git a/releases/RELEASE_NOTES_v3.13.47.md b/releases/RELEASE_NOTES_v3.13.47.md
+new file mode 100644
+index 0000000..3a1d330
+--- /dev/null
++++ b/releases/RELEASE_NOTES_v3.13.47.md
+@@ -0,0 +1,11 @@
++## 대용량 PDF와 체크리스트 편집 개선
++
++- PDF에서 페이지를 편집할 때 전체 문서를 복제하지 않고 필요한 페이지만 가져오도록 변경했습니다.
++- 체크리스트처럼 하나의 텍스트에 넓은 간격으로 배치된 문자들을 독립적으로 선택할 수 있게 했습니다.
++- 회전된 글자는 기존 선택 방식을 유지합니다.
++
++## 확인 범위
++
++- 합성 PDF의 체크 기호 개별 편집과 나머지 문자 보존, 대용량 페이지 처리 및 Windows 실행 파일의 편집 작업자를 자동 검사합니다.
++- Windows 사용자 환경에서 마우스로 선택하고 수정하는 전 과정은 별도 확인이 필요합니다.
++- 사용자가 겪은 강제 종료의 원인은 확인되지 않았습니다.
+diff --git a/scripts/check_pdf_edit_exe.py b/scripts/check_pdf_edit_exe.py
+new file mode 100644
+index 0000000..a9aa5ba
+--- /dev/null
++++ b/scripts/check_pdf_edit_exe.py
+@@ -0,0 +1,75 @@
++"""Check editing a synthetic long PDF in the packaged Windows worker."""
++import hashlib
++import json
++from pathlib import Path
++import subprocess
++import tempfile
++
++from pypdf import PdfReader, PdfWriter
++from reportlab.pdfgen import canvas
++
++ROOT = Path(__file__).resolve().parents[1]
++result = json.loads((ROOT / 'build' / 'windows-run' / 'Build_Result.json').read_text(encoding='utf-8-sig'))
++if result.get('status') != 'passed':
++    raise RuntimeError('The Windows build did not pass')
++exe = Path(result['exe'])
++if not exe.is_file():
++    raise RuntimeError('The checked Windows executable is unavailable')
++
++with tempfile.TemporaryDirectory(prefix='viewer-pdf-edit-exe-') as directory:
++    root = Path(directory)
++    source, output = root / 'synthetic.pdf', root / 'edit.pdf'
++    writer = PdfWriter()
++    for _ in range(1722):
++        writer.add_blank_page(width=500, height=700)
++    with source.open('wb') as stream:
++        writer.write(stream)
++    before = hashlib.sha256(source.read_bytes()).hexdigest()
++    request = {'id': 1, 'op': 'edit', 'path': str(source), 'page': 792,
++               'payload': {'operation': {'kind': 'cover', 'rect': [10, 10, 20, 20], 'color': '#ffffff'},
++                           'output': str(output)}}
++    completed = subprocess.run([str(exe), '--pdf-worker'],
++        input=(json.dumps(request)+'\n').encode('ascii'), stdout=subprocess.PIPE,
++        stderr=subprocess.PIPE, timeout=180)
++    messages = [json.loads(line) for line in completed.stdout.splitlines() if line.strip()]
++    if completed.returncode != 0 or not messages or not messages[-1].get('ok'):
++        raise RuntimeError('Frozen PDF edit failed: '+repr((completed.returncode, messages, completed.stderr[-1000:])))
++    if len(PdfReader(output).pages) != 1 or hashlib.sha256(source.read_bytes()).hexdigest() != before:
++        raise RuntimeError('Frozen edit did not preserve the source or produce one page')
++print('PDF edit worker passed: 1,722-page synthetic source, one-page edit, source unchanged')
++
++# Exercise analysis and text editing through the frozen worker, using only
++# synthetic content. This does not represent mouse selection in the GUI.
++def worker(request):
++    completed = subprocess.run([str(exe), '--pdf-worker'],
++        input=(json.dumps(request)+'\n').encode('ascii'), stdout=subprocess.PIPE,
++        stderr=subprocess.PIPE, timeout=180)
++    messages = [json.loads(line) for line in completed.stdout.splitlines() if line.strip()]
++    if completed.returncode != 0 or not messages or not messages[-1].get('ok'):
++        raise RuntimeError('Frozen checklist worker failed: '+repr((completed.returncode, messages, completed.stderr[-1000:])))
++    return messages[-1]
++
++with tempfile.TemporaryDirectory(prefix='viewer-pdf-checklist-exe-') as directory:
++    root = Path(directory); source = root/'synthetic.pdf'; output = root/'edited.pdf'
++    c = canvas.Canvas(str(source), pagesize=(300, 250)); c.setFont('Helvetica', 10)
++    t = c.beginText(35, 150); t.setCharSpace(24); t.textOut('XXO'); c.drawText(t)
++    c.drawString(35, 100, 'ordinary words stay together'); c.showPage(); c.save()
++    before = hashlib.sha256(source.read_bytes()).hexdigest()
++    info = worker({'id':1, 'op':'editinfo', 'path':str(source), 'page':0})['info']
++    cells = [s for s in info['spans'] if s['text'] in ('X','O')]
++    if [s['text'] for s in cells] != ['X','X','O']:
++        raise RuntimeError('Frozen worker did not separate checklist symbols')
++    selected=cells[0]; r=selected['rect']
++    operation={'kind':'format','rect':r,'old_text':'X','text':'O',
++               'source_glyphs':selected['source_glyphs'],'font':'Helvetica',
++               'size':selected['size'],'bold':False,'color':'#000000','rotate':0,
++               'align':'left','strict_size':True,'target':[r[0],r[1]-3,r[0]+16,r[3]+8]}
++    worker({'id':2,'op':'edit','path':str(source),'page':0,
++            'payload':{'operation':operation,'output':str(output)}})
++    after=worker({'id':3,'op':'editinfo','path':str(output),'page':0})['info']
++    remaining=[s['text'] for s in after['spans'] if s['text'] in ('X','O') and s['rect'][0]>r[2]+5]
++    if remaining != ['X','O'] or not any(o.get('text')=='O' for o in after['objects']):
++        raise RuntimeError('Frozen worker did not preserve neighboring checklist symbols')
++    if hashlib.sha256(source.read_bytes()).hexdigest() != before:
++        raise RuntimeError('Frozen checklist edit changed its source')
++print('PDF edit worker passed: synthetic checklist symbols individually identified and edited')
+diff --git a/tests/test_checklist_cell_edit.py b/tests/test_checklist_cell_edit.py
+new file mode 100644
+index 0000000..05f74e2
+--- /dev/null
++++ b/tests/test_checklist_cell_edit.py
+@@ -0,0 +1,61 @@
++"""Widely spaced glyphs in a single PDF text operation remain independently editable."""
++import os
++from pathlib import Path
++import tempfile
++import unittest
++
++os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
++from reportlab.pdfgen import canvas
++import pypdfium2 as pdfium
++import pdf_page_dragger as viewer
++
++
++def page_pixels(path):
++    doc=pdfium.PdfDocument(str(path));page=doc[0]
++    image=page.render(scale=2).to_pil().convert('RGB')
++    size=image.size;pixels=image.tobytes()
++    page.close();doc.close()
++    return size,pixels
++
++
++class ChecklistCellEditTests(unittest.TestCase):
++    def test_one_glyph_in_spaced_text_object_can_be_replaced(self):
++        with tempfile.TemporaryDirectory() as directory:
++            src=Path(directory)/'source.pdf';out=Path(directory)/'edited.pdf'
++            c=canvas.Canvas(str(src),pagesize=(300,250));c.setFont('Helvetica',10)
++            c.saveState();text=c.beginText(35,150);text.setCharSpace(24);text.textOut('XXO');c.drawText(text);c.restoreState()
++            c.drawString(35,100,'ordinary words stay together');c.line(20,145,200,145);c.showPage();c.save()
++            before=viewer.inspect_edit_page(str(src),0)
++            cells=[s for s in before['spans'] if s['text'] in ('X','O')]
++            self.assertEqual([s['text'] for s in cells],['X','X','O'])
++            self.assertTrue(any(s['text']=='ordinary words stay together' for s in before['spans']))
++            selected=cells[0];r=selected['rect']
++            self.assertIs(viewer.nearest_text_hit(before['spans'],[(r[0]+r[2])/2,(r[1]+r[3])/2],2),selected)
++            operation={'kind':'format','rect':r,'old_text':'X','text':'O',
++                       'source_glyphs':selected['source_glyphs'],'font':'Helvetica',
++                       'size':selected['size'],'bold':False,'color':'#000000','rotate':0,
++                       'align':'left','strict_size':True,'target':[r[0],r[1]-3,r[0]+16,r[3]+8]}
++            viewer.apply_page_edit(str(src),0,operation,str(out))
++            after=viewer.inspect_edit_page(str(out),0)
++            native=[s for s in after['spans'] if s['text'] in ('X','O') and s['rect'][0]>r[2]+5]
++            self.assertEqual([s['text'] for s in native],['X','O'])
++            self.assertTrue(any(o.get('text')=='O' for o in after['objects']))
++            self.assertTrue(any(s['text']=='ordinary words stay together' for s in after['spans']))
++            size,a=page_pixels(src);size2,b=page_pixels(out);self.assertEqual(size,size2)
++            # The table line and every pixel outside the chosen cell are exact.
++            width,height=size;changed=0
++            for y in range(height):
++                for x in range(width):
++                    i=(y*width+x)*3
++                    if a[i:i+3]!=b[i:i+3]:
++                        changed+=1
++                        self.assertTrue((r[0]-2)*2<=x<=(r[0]+18)*2 and (r[1]-5)*2<=y<=(r[3]+10)*2)
++            self.assertGreater(changed,0)
++
++    def test_rotated_spans_are_left_unchanged(self):
++        chars=[{'c':'X','bbox':[0,0,4,4],'origin':[0,0]},
++               {'c':'X','bbox':[30,0,34,4],'origin':[30,0]}]
++        self.assertIs(viewer.split_spaced_text_span({'chars':chars,'size':10},90)[0],chars)
++
++
++if __name__=='__main__':unittest.main()
+diff --git a/tests/test_editable_copy_bounded.py b/tests/test_editable_copy_bounded.py
+new file mode 100644
+index 0000000..eb50d2d
+--- /dev/null
++++ b/tests/test_editable_copy_bounded.py
+@@ -0,0 +1,77 @@
++"""A page edit must preserve appearance and annotations when extracted alone."""
++import io
++import os
++from pathlib import Path
++import tempfile
++import unittest
++
++os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
++from pypdf import PdfReader, PdfWriter
++from pypdf.annotations import Text
++from reportlab.pdfgen import canvas
++import pypdfium2 as pdfium
++import pdf_page_dragger as viewer
++import viewer_pdf_engine
++
++
++def render(data, number=0):
++    document = pdfium.PdfDocument(data)
++    page = document[number]
++    image = page.render(scale=1.2).to_pil()
++    result = image.size, image.tobytes()
++    page.close()
++    document.close()
++    return result
++
++
++class EditableCopyTests(unittest.TestCase):
++    def test_extract_rotated_page_preserves_content_and_annotation(self):
++        source_data = io.BytesIO()
++        c = canvas.Canvas(source_data, pagesize=(300, 420))
++        c.setFont('Helvetica-Bold', 16)
++        c.drawString(50, 200, 'Checklist value 42')
++        c.line(20, 80, 220, 80)
++        c.showPage()
++        c.save()
++        writer = PdfWriter()
++        for _ in range(12):
++            writer.add_blank_page(width=320, height=420)
++        writer.add_page(PdfReader(io.BytesIO(source_data.getvalue())).pages[0])
++        writer.pages[12].rotate(90)
++        writer.add_annotation(12, Text(rect=(10, 10, 25, 25), text='A note'))
++        with tempfile.TemporaryDirectory() as directory:
++            path = Path(directory) / 'source.pdf'
++            with path.open('wb') as file:
++                writer.write(file)
++            # Compare against the old extraction path; annotation appearance is
++            # renderer dependent but must be preserved in the PDF structure.
++            with viewer_pdf_engine.open(path) as source:
++                with viewer_pdf_engine.open() as old:
++                    old.insert_pdf(source, from_page=12, to_page=12)
++                    baseline = old.tobytes()
++            with viewer.editable_copy(str(path), 12, normalize_rotation=False) as page:
++                actual = page.tobytes()
++            expected_page = PdfReader(io.BytesIO(baseline)).pages[0]
++            actual_reader = PdfReader(io.BytesIO(actual))
++            actual_page = actual_reader.pages[0]
++            self.assertEqual(len(actual_reader.pages), 1)
++            self.assertEqual(actual_page.rotation, 90)
++            self.assertEqual(actual_page.extract_text(), expected_page.extract_text())
++            self.assertEqual(len(actual_page['/Annots']), 1)
++            self.assertEqual(actual_page['/Annots'][0].get_object()['/Contents'], 'A note')
++            self.assertEqual(render(actual), render(baseline))
++
++    def test_reject_invalid_page_number(self):
++        writer = PdfWriter()
++        writer.add_blank_page(width=300, height=420)
++        with tempfile.TemporaryDirectory() as directory:
++            path = Path(directory) / 'source.pdf'
++            with path.open('wb') as file:
++                writer.write(file)
++            for number in (-1, 1):
++                with self.subTest(number=number), self.assertRaises(IndexError):
++                    viewer.editable_copy(str(path), number)
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/tests/test_release_automation.py b/tests/test_release_automation.py
+index 538a82c..f42578c 100644
+--- a/tests/test_release_automation.py
++++ b/tests/test_release_automation.py
+@@ -52,7 +52,7 @@ class TestConfigAndCompliance(unittest.TestCase):
+             with self.assertRaises(RuntimeError):strict_report(path,'test',False,0,required_count=count)
+     def test_version_matches_real_source_and_publication_is_explicit(self):
+         config=ci_common.release_config(ROOT)
+-        self.assertEqual(config['version'], '3.13.46'); self.assertIs(type(config['publish']),bool)
++        self.assertEqual(config['version'], '3.13.47'); self.assertIs(type(config['publish']),bool)
+     def test_manual_false_is_not_treated_as_true(self):
+         self.assertFalse(ci_common.release_config(ROOT, 'false')['publish'])
+         self.assertTrue(ci_common.release_config(ROOT, 'true')['publish'])
