@@ -531,14 +531,18 @@ class GitHubClient:
 
     def create_draft(self,plan):
         repo=normalize_repo(plan['repo']);tag=valid_tag(plan['tag'])
+        payload={'tag_name':tag,'name':plan['title'],'body':plan['notes'],
+                 'draft':True,'prerelease':plan['prerelease']}
+        if 'target_commitish' in plan:
+            if not re.fullmatch(r'[0-9a-f]{40}',plan['target_commitish']):
+                raise BuildError('새 릴리스의 검증 커밋 SHA가 잘못되었습니다.')
+            payload['target_commitish']=plan['target_commitish']
         # Record the attempt before sending a write. A timeout can happen after
         # GitHub committed it; restarting must not blindly create another draft.
         atomic_json(self.folder/'Release_State.json',{'schema':1,'repo':repo,'tag':tag,
             'create_started':True,'release_id':None})
         try:
-            release=self.api(f'repos/{repo}/releases',method='POST',payload={
-                'tag_name':tag,'name':plan['title'],'body':plan['notes'],
-                'draft':True,'prerelease':plan['prerelease']})
+            release=self.api(f'repos/{repo}/releases',method='POST',payload=payload)
         except Cancelled:raise
         except BuildError as exc:
             release=self.recover_release(repo,tag)

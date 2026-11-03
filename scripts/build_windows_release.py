@@ -13,6 +13,8 @@ from ci_common import ROOT, BUILD_TOOLS, release_config, inside
 from build_common import BuildError, atomic_json, read_json, clean_environment
 from github_release import prepare_release, verify_plan_files
 from installer_build import find_iscc, inspect_iscc
+from release_artifact import input_identity
+from build_common import sha256
 
 KOREAN_SHA256 = 'a9427833f1975fb13dcaa09bc38aa16eba07698ce9d9596575fdd3362f2646a1'
 
@@ -36,6 +38,7 @@ def build() -> dict:
     if os.name != 'nt':
         raise BuildError('The Windows release must be built on a Windows runner')
     config = release_config(publish_override=os.environ.get('INPUT_PUBLISH'))
+    inputs = input_identity(check_worktree=True)
     repository = os.environ.get('GITHUB_REPOSITORY', 'faintstar85-source/the-viewer')
     source = inside(ROOT, config['source'])
     notes = inside(ROOT, config['notes']).read_text(encoding='utf-8-sig')
@@ -75,6 +78,22 @@ def build() -> dict:
                'source_checks', 'exe_checks', 'final_location_checks', 'windows_exe_checks_passed', 'tested_platform', 'python')}
     summary['commit'] = os.environ.get('GITHUB_SHA', '')
     summary['installer_sha256'] = result['installer']['sha256']
+    summary['release_source_sha256'] = result['release_py']['sha256']
+    # Preserve the actual dependency resolution and toolchain used by these bytes.
+    # A retry reuses them; it does not resolve version ranges again.
+    shutil.copy2(run / 'installed_versions.txt', dist / 'BUILD_DEPENDENCIES.txt')
+    environment = read_json(run / 'Environment.json')
+    environment.update(python=sys.version, image_os=os.environ.get('ImageOS', ''),
+                       image_version=os.environ.get('ImageVersion', ''),
+                       compiler_files={p.relative_to(compiler.parent).as_posix(): sha256(p)
+                                       for p in compiler.parent.rglob('*') if p.is_file()})
+    atomic_json(dist / 'BUILD_ENVIRONMENT.json', environment)
+    if input_identity(check_worktree=True) != inputs:
+        raise BuildError('Build inputs changed during the Windows build')
+    summary.update(schema=2, inputs=inputs, repository=repository,
+                   run_id=int(os.environ['GITHUB_RUN_ID']), run_attempt=int(os.environ['GITHUB_RUN_ATTEMPT']),
+                   environment_files={name: sha256(dist / name) for name in
+                                      ('BUILD_DEPENDENCIES.txt', 'BUILD_ENVIRONMENT.json')})
     atomic_json(dist / 'BUILD_VERIFICATION.json', summary)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return plan
