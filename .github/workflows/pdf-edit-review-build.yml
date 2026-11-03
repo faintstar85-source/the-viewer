@@ -30,13 +30,16 @@ jobs:
       - name: Verify and apply source patch only inside runner
         shell: pwsh
         run: |
-          $expected = '5518f2c3ac207adaf35754537932feb5cde043ea1c22835ae9b8da76f30edfa8'
+          $expected = 'f5b292ed33474ea44495d3341d11407b0756de3d26ffc6b23943218fcc0253d4'
           if ((Get-FileHash -Algorithm SHA256 tools/patches/large-pdf-checklist-20261103.diff).Hash.ToLowerInvariant() -ne $expected) { throw 'Patch hash mismatch' }
           git apply --check tools/patches/large-pdf-checklist-20261103.diff
           if ($LASTEXITCODE -ne 0) { throw 'Patch preflight failed' }
           git apply tools/patches/large-pdf-checklist-20261103.diff
           if ($LASTEXITCODE -ne 0) { throw 'Patch apply failed' }
           if ((Get-FileHash -Algorithm SHA256 pdf_page_dragger.py).Hash.ToLowerInvariant() -ne '60b38b1d2eb4d03e075b3f995ab33f4c5783a233e9e49c1c9928b3602f64fa2d') { throw 'Source hash mismatch' }
+          python scripts/sync_pdf_edit_capsule.py
+          if ($LASTEXITCODE -ne 0) { throw 'PDF worker synchronization failed' }
+          Write-Host ('Synchronized source SHA256: ' + (Get-FileHash -Algorithm SHA256 pdf_page_dragger.py).Hash)
           $trackedPdf = git ls-files '*.pdf'
           if ($trackedPdf) { throw 'Unexpected PDF in checkout' }
       - name: Install PDF and Qt runtime dependencies
