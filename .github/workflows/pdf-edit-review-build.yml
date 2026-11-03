@@ -1,0 +1,79 @@
+name: PDF editing Windows review build
+on:
+  push:
+    branches:
+      - fix/large-pdf-checklist-20261103
+    paths:
+      - .github/workflows/pdf-edit-review-build.yml
+permissions:
+  contents: read
+jobs:
+  review:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
+      INPUT_PUBLISH: 'false'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: fix/large-pdf-checklist-20261103
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          architecture: x64
+      - name: Verify and apply source patch only inside runner
+        shell: pwsh
+        run: |
+          $expected = '5518f2c3ac207adaf35754537932feb5cde043ea1c22835ae9b8da76f30edfa8'
+          if ((Get-FileHash -Algorithm SHA256 tools/patches/large-pdf-checklist-20261103.diff).Hash.ToLowerInvariant() -ne $expected) { throw 'Patch hash mismatch' }
+          git apply --check tools/patches/large-pdf-checklist-20261103.diff
+          if ($LASTEXITCODE -ne 0) { throw 'Patch preflight failed' }
+          git apply tools/patches/large-pdf-checklist-20261103.diff
+          if ($LASTEXITCODE -ne 0) { throw 'Patch apply failed' }
+          if ((Get-FileHash -Algorithm SHA256 pdf_page_dragger.py).Hash.ToLowerInvariant() -ne '60b38b1d2eb4d03e075b3f995ab33f4c5783a233e9e49c1c9928b3602f64fa2d') { throw 'Source hash mismatch' }
+          $trackedPdf = git ls-files '*.pdf'
+          if ($trackedPdf) { throw 'Unexpected PDF in checkout' }
+      - name: Install PDF and Qt runtime dependencies
+        run: python -m pip install PySide6==6.11.1 pypdf==6.10.0 pypdfium2==5.14.0 Pillow==12.2.0 reportlab==4.4.9
+      - name: Check checklist editing on synthetic PDF
+        run: python -m unittest discover -s tests -p test_checklist_cell_edit.py -v
+      - name: Check large PDF page editing
+        run: python -m unittest discover -s tests -p test_editable_copy_bounded.py -v
+      - name: Check existing PDF page operations
+        run: python -m unittest discover -s tests -p test_large_pdf_operations.py -v
+      - name: Validate source metadata
+        run: python scripts/validate_repository.py
+      - name: Prepare pinned source archives and notices
+        run: python scripts/prepare_compliance.py
+      - name: Build Windows review package
+        run: python -u scripts/build_windows_release.py
+      - name: Check packaged PDF export worker
+        run: python scripts/check_pdf_export_exe.py
+      - name: Check packaged large PDF and checklist edit worker
+        run: python scripts/check_pdf_edit_exe.py
+      - name: Verify output names and archives contain no PDF
+        shell: pwsh
+        run: |
+          python -c "import pathlib,zipfile; files=list(pathlib.Path('dist').rglob('*')); pdfs=[str(p) for p in files if p.is_file() and p.suffix.lower()=='.pdf']; archives=[p for p in files if p.is_file() and p.suffix.lower()=='.zip']; pdfs += [str(z)+'::'+n for z in archives for n in zipfile.ZipFile(z).namelist() if n.lower().endswith('.pdf')]; print('Output files:',*[str(p) for p in files if p.is_file()],sep='\\n'); print('PDFs found:',len(pdfs)); assert not pdfs, 'Unexpected PDF in output'"
+      - name: Keep Windows review package
+        uses: actions/upload-artifact@v4
+        with:
+          name: TheViewer-v3.13.47-review-only
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Keep build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: TheViewer-v3.13.47-review-diagnostics
+          path: |
+            build/windows-run/*.json
+            build/windows-run/*.txt
+            build/windows-run/logs/
+          if-no-files-found: ignore
+          retention-days: 14
