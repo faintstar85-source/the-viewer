@@ -588,6 +588,15 @@ def run_checks(namespace, report_path, nonce):
                     details=namespace['page_drag_selftest']()
                     if details.get('passed') is not True or details.get('native_virtual_file_payloads') is not True:
                         raise ValueError('Windows PDF page-transfer protocol check failed')
+                    if not getattr(sys,'frozen',False) and os.environ.get('GITHUB_ACTIONS')=='true':
+                        environment=os.environ.copy();environment['QT_QPA_PLATFORM']='windows'
+                        environment['THEVIEWER_ISOLATED_DRAG_TEST']='1'
+                        native=subprocess.run([sys.executable,namespace['__file__'],'--page-drag-self-test'],
+                            stdout=subprocess.PIPE,stderr=subprocess.STDOUT,env=environment,timeout=90)
+                        output=native.stdout.decode('utf-8','replace');print(output,flush=True)
+                        if native.returncode!=0:raise ValueError('Native Windows source drag check failed: '+str(native.returncode))
+                        if json.loads(output.strip().splitlines()[-1]).get('native_qt_drop') is not True:
+                            raise ValueError('Native Windows source drag result is missing')
                     return details
                 return 'DPAPI 테스트 값 왕복·COM/Shell DLL 로드 (사용자 키 접근 없음)'
             check('Windows pywin32·키 저장·Shell', windows)

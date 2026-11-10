@@ -14981,12 +14981,15 @@ def create_windows_drag_objects(mime, cancelled, report_error=None):
             self.preparing = False
             self.failed = False
             self.effects = {}
+            self.feedback = {}
 
         def check_format(self, fmt, query=False):
             cf, target, aspect, index, tymed = fmt
             if aspect != ASPECT:
                 fail(winerror.DV_E_DVASPECT)
-            if cf == CF_CONTENTS:
+            if (cf,aspect,index) in self.feedback:
+                if not tymed & HGLOBAL:fail(winerror.DV_E_TYMED)
+            elif cf == CF_CONTENTS:
                 if not (0 <= index < count or (query and index == -1)):
                     fail(winerror.DV_E_LINDEX)
                 if not tymed & (ISTREAM | HGLOBAL):
@@ -15034,6 +15037,9 @@ def create_windows_drag_objects(mime, cancelled, report_error=None):
             self.check_format(fmt)
             cf, target, aspect, index, tymed = fmt
             medium = pythoncom.STGMEDIUM()
+            if (cf,aspect,index) in self.feedback:
+                medium.set(HGLOBAL,memoryview(self.feedback[(cf,aspect,index)]))
+                return medium
             if cf != CF_CONTENTS:
                 # bytes would acquire an extra NUL in pywin32, breaking JSON
                 # and altering binary payload lengths. memoryview is exact.
@@ -15060,20 +15066,28 @@ def create_windows_drag_objects(mime, cancelled, report_error=None):
             return (cf, None, aspect, index, tymed)
 
         def SetData(self, fmt, medium, release):
-            cf, target, aspect, index, tymed = fmt
-            if cf not in effect_formats or aspect != ASPECT or not tymed & HGLOBAL:
-                fail(winerror.DV_E_FORMATETC)
-            data = bytes(medium.data)
-            if len(data) < 4:
-                fail(winerror.DV_E_FORMATETC)
-            self.effects[cf] = struct.unpack_from('<I', data)[0]
-            # The pywin32 gateway owns/relinquishes STGMEDIUM as appropriate.
+            # IDropTargetHelper also writes private drag-image/description formats.
+            # pywin32's gateway takes ownership when fRelease is true even if the
+            # callback raises. Returning failure would let the caller free the same
+            # medium again. Accept optional feedback without throwing or manually
+            # releasing it, and copy supported payloads before the gateway cleans up.
+            try:
+                cf,target,aspect,index,tymed=fmt
+                if medium.tymed==HGLOBAL:
+                    data=bytes(medium.data)
+                    if cf in effect_formats and len(data)>=4:
+                        self.effects[cf]=struct.unpack_from('<I',data)[0]
+                    if cf not in static and cf!=CF_CONTENTS and aspect==ASPECT:
+                        self.feedback[(cf,aspect,index)]=data
+            except Exception:
+                pass  # Unsupported optional shell media must not cause double release.
 
         def EnumFormatEtc(self, direction):
             if direction == pythoncom.DATADIR_GET:
                 formats = [(cf, None, ASPECT, -1, HGLOBAL) for cf in static]
                 formats += [(CF_CONTENTS, None, ASPECT, i, ISTREAM | HGLOBAL)
                             for i in range(count)]
+                formats += [(cf,None,aspect,index,HGLOBAL) for cf,aspect,index in self.feedback]
             elif direction == pythoncom.DATADIR_SET:
                 formats = [(cf, None, ASPECT, -1, HGLOBAL) for cf in effect_formats]
             else:
@@ -21604,6 +21618,8 @@ def publish_print_pdf(source, target, options, *, progress=None, cancelled=lambd
         if cache is not None:cache.cleanup()
 
 def native_drag_qt_smoke(mime):
+    def trace(stage):print('Native Qt drag: '+stage,flush=True)
+    trace('start')
     import ctypes
     from ctypes import wintypes
     import json
@@ -21641,6 +21657,7 @@ def native_drag_qt_smoke(mime):
 
     class Target(QWidget):
         def dragEnterEvent(self, event):
+            trace('target drag enter')
             try:
                 data = event.mimeData()
                 if all(data.hasFormat(fmt) for fmt in expected):
@@ -21660,6 +21677,7 @@ def native_drag_qt_smoke(mime):
             event.accept()
 
         def dropEvent(self, event):
+            trace('target drop')
             try:
                 received = {fmt: bytes(event.mimeData().data(fmt)) for fmt in expected}
                 if received != expected:
@@ -21703,7 +21721,9 @@ def native_drag_qt_smoke(mime):
 
     done = threading.Event()
     worker = None
+    trace('create widgets')
     source, target = QWidget(), Target()
+    trace('widgets created')
     target.setAcceptDrops(True)
     original_ensure = mime.ensure_files
     instance_had_ensure = 'ensure_files' in getattr(mime, '__dict__', {})
@@ -21730,20 +21750,25 @@ def native_drag_qt_smoke(mime):
         height = min(220, max(120, screen.height()-80))
         source.setGeometry(screen.x()+20, screen.y()+30, width, height)
         target.setGeometry(screen.x()+screen.width()-width-20, screen.y()+30, width, height)
+        trace('show widgets')
         source.show();target.show();target.raise_();target.activateWindow()
+        trace('widgets shown')
         # Settle HWND creation and OLE drop-target registration before synthesizing.
         for _ in range(12):
             app.processEvents()
             time.sleep(.025)
         start, finish = center(source), center(target)
+        trace('press mouse')
         pointer(*start)
         user32.mouse_event(0x0002, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTDOWN
         time.sleep(.05)
         if not user32.GetAsyncKeyState(1) & 0x8000:
             raise RuntimeError('Synthetic left-button press was not delivered')
         deadline = time.monotonic()+10
+        trace('initialize OLE')
         ole32.OleInitialize(None)
         initialized = True
+        trace('create data object')
         data_object, drop_source = factory(mime, lambda: done.is_set() or time.monotonic() >= deadline)
 
         def drive_pointer():
@@ -21765,7 +21790,9 @@ def native_drag_qt_smoke(mime):
 
         worker = threading.Thread(target=drive_pointer, name='isolated-drag-input', daemon=True)
         worker.start()
+        trace('enter DoDragDrop')
         result = pythoncom.DoDragDrop(data_object, drop_source, 1)
+        trace('DoDragDrop returned')
         evidence['native_effect'] = int(result)
         evidence['copy'] = result == 1
         evidence['native_cancelled'] = bool(getattr(mime, 'native_cancelled', False))
@@ -21790,11 +21817,13 @@ def native_drag_qt_smoke(mime):
                     del mime.ensure_files
                 except AttributeError:
                     mime.ensure_files = original_ensure
+            trace('cleanup widgets')
             source.hide();target.hide()
             source.deleteLater();target.deleteLater()
             app.processEvents()
             if initialized:
                 ole32.OleUninitialize()
+            trace('cleanup complete')
 
 
 def page_drag_selftest():
@@ -21832,6 +21861,11 @@ def page_drag_selftest():
             finally:cancelled.deleteLater()
             if sys.platform=='win32':
                 import pythoncom,win32clipboard
+                if os.environ.get('THEVIEWER_ISOLATED_DRAG_TEST')=='1':
+                    checkpoint('native Qt drop')
+                    native_drag_qt_smoke(mime)
+                    checkpoint('native Qt drop passed')
+                    report['native_qt_drop']=True
                 checkpoint('native factory')
                 obj,drop_source=create_windows_drag_objects(mime,lambda:False)
                 checkpoint('native enumeration')
@@ -21845,6 +21879,15 @@ def page_drag_selftest():
                 desc=obj.GetData(fmt(descriptor,-1,pythoncom.TYMED_HGLOBAL))
                 checkpoint('native descriptor returned')
                 assert bytes(desc.data)==mime.descriptor_bytes() and not mime.paths
+                feedback=win32clipboard.RegisterClipboardFormat('TheViewerSelfTestFeedback')
+                for release in (False,True):
+                    checkpoint('native shell feedback '+str(release))
+                    value=pythoncom.STGMEDIUM();value.set(pythoncom.TYMED_HGLOBAL,memoryview(b'checked-feedback'))
+                    obj.SetData(fmt(feedback,-1,pythoncom.TYMED_HGLOBAL),value,release)
+                    del value
+                    copied_feedback=obj.GetData(fmt(feedback,-1,pythoncom.TYMED_HGLOBAL))
+                    assert bytes(copied_feedback.data)==b'checked-feedback'
+                    del copied_feedback
                 for i,width in enumerate((504,500,504,502)):
                     checkpoint('native stream '+str(i))
                     medium=obj.GetData(fmt(contents,i,pythoncom.TYMED_ISTREAM))
@@ -21861,11 +21904,6 @@ def page_drag_selftest():
                 del obj,drop_source,desc
                 checkpoint('native release passed')
                 report['native_virtual_file_payloads']=True
-                if os.environ.get('THEVIEWER_ISOLATED_DRAG_TEST')=='1':
-                    checkpoint('native Qt drop')
-                    native_drag_qt_smoke(mime)
-                    checkpoint('native Qt drop passed')
-                    report['native_qt_drop']=True
             checkpoint('source close')
             source.unlink()
             assert len(PdfReader(refs[0].path).pages)==4
