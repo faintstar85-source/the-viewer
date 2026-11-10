@@ -21654,6 +21654,7 @@ def native_drag_qt_smoke(mime):
     evidence = {'received': False, 'copy': False, 'drag_enter': False,
                 'metadata': {}, 'export_calls': 0, 'driver_errors': []}
     callback_errors = []
+    target_entered = threading.Event()
 
     class Target(QWidget):
         def dragEnterEvent(self, event):
@@ -21662,6 +21663,7 @@ def native_drag_qt_smoke(mime):
                 data = event.mimeData()
                 if all(data.hasFormat(fmt) for fmt in expected):
                     evidence['drag_enter'] = True
+                    target_entered.set()
                     # Exercise GetData through Qt's native converter, not the
                     # original Python QMimeData instance or a direct factory call.
                     if all(bytes(data.data(fmt)) == value for fmt, value in expected.items()):
@@ -21699,6 +21701,8 @@ def native_drag_qt_smoke(mime):
     user32.GetWindowRect.restype = wintypes.BOOL
     user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
     user32.GetAsyncKeyState.restype = ctypes.c_short
+    user32.GetKeyState.argtypes = [ctypes.c_int]
+    user32.GetKeyState.restype = ctypes.c_short
     user32.mouse_event.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
                                   wintypes.DWORD, ctypes.c_size_t]
     user32.mouse_event.restype = None
@@ -21751,7 +21755,7 @@ def native_drag_qt_smoke(mime):
         source.setGeometry(screen.x()+20, screen.y()+30, width, height)
         target.setGeometry(screen.x()+screen.width()-width-20, screen.y()+30, width, height)
         trace('show widgets')
-        source.show();target.show();target.raise_();target.activateWindow()
+        source.show();target.show();source.raise_();source.activateWindow()
         trace('widgets shown')
         # Settle HWND creation and OLE drop-target registration before synthesizing.
         for _ in range(12):
@@ -21761,9 +21765,20 @@ def native_drag_qt_smoke(mime):
         trace('press mouse')
         pointer(*start)
         user32.mouse_event(0x0002, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTDOWN
-        time.sleep(.05)
-        if not user32.GetAsyncKeyState(1) & 0x8000:
-            raise RuntimeError('Synthetic left-button press was not delivered')
+        # OLE initializes from queue-synchronized GetKeyState, not merely the
+        # asynchronous physical state. Process WM_LBUTTONDOWN before DoDragDrop.
+        press_deadline = time.monotonic()+2
+        while time.monotonic() < press_deadline:
+            app.processEvents()
+            if user32.GetKeyState(1) & 0x8000:
+                break
+            time.sleep(.01)
+        evidence['left_down_before_drag'] = bool(user32.GetKeyState(1) & 0x8000)
+        evidence['async_left_down_before_drag'] = bool(user32.GetAsyncKeyState(1) & 0x8000)
+        trace('button state '+repr({key:evidence[key] for key in
+                                   ('left_down_before_drag','async_left_down_before_drag')}))
+        if not (evidence['left_down_before_drag'] and evidence['async_left_down_before_drag']):
+            raise RuntimeError('Synthetic left press did not reach the GUI input queue: '+repr(evidence))
         deadline = time.monotonic()+10
         trace('initialize OLE')
         ole32.OleInitialize(None)
@@ -21782,7 +21797,17 @@ def native_drag_qt_smoke(mime):
                             round(start[1]+(finish[1]-start[1])*step/12))
                     if done.wait(.025):
                         return
-                done.wait(.4)
+                # Keep the drag live until the actual Qt receiver has entered;
+                # startup/CI scheduling latency must not turn this into an empty drop.
+                enter_deadline = time.monotonic()+3
+                while not target_entered.is_set() and not done.is_set() and time.monotonic()<enter_deadline:
+                    pointer(finish[0]+1,finish[1])
+                    if done.wait(.04):break
+                    pointer(*finish)
+                    done.wait(.04)
+                if not target_entered.is_set() and not done.is_set():
+                    evidence['driver_errors'].append('Native drag never entered Qt target within 3 seconds')
+                if target_entered.is_set():done.wait(.15)
             except Exception as exc:
                 evidence['driver_errors'].append(str(exc))
             finally:
@@ -21791,7 +21816,9 @@ def native_drag_qt_smoke(mime):
         worker = threading.Thread(target=drive_pointer, name='isolated-drag-input', daemon=True)
         worker.start()
         trace('enter DoDragDrop')
+        drag_started = time.monotonic()
         result = pythoncom.DoDragDrop(data_object, drop_source, 1)
+        evidence['drag_elapsed_ms'] = round((time.monotonic()-drag_started)*1000)
         trace('DoDragDrop returned')
         evidence['native_effect'] = int(result)
         evidence['copy'] = result == 1
