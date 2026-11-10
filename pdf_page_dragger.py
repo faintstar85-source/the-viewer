@@ -21799,6 +21799,8 @@ def native_drag_qt_smoke(mime):
 
 def page_drag_selftest():
     """Protocol/owned-copy checks; this does not claim a physical Explorer mouse test."""
+    def checkpoint(stage):print('Page drag check: '+stage,flush=True)
+    checkpoint('start')
     import struct
     from pypdf import PdfReader, PdfWriter
     app=QApplication.instance() or QApplication([])
@@ -21812,7 +21814,9 @@ def page_drag_selftest():
         mime=PageDragData(pages,uuid.uuid4().hex,separate=True)
         try:
             payload=read_page_transfer(mime)
+            checkpoint('receiver snapshot')
             refs=snapshot_page_transfer(payload,root/'receiver')
+            checkpoint('receiver snapshot passed')
             assert [int(p.mediabox.width) for p in PdfReader(refs[0].path).pages]==[504,500,504,502]
             report['page_order_and_duplicates']=True
             assert source.read_bytes()==original
@@ -21828,34 +21832,48 @@ def page_drag_selftest():
             finally:cancelled.deleteLater()
             if sys.platform=='win32':
                 import pythoncom,win32clipboard
+                checkpoint('native factory')
                 obj,drop_source=create_windows_drag_objects(mime,lambda:False)
+                checkpoint('native enumeration')
                 descriptor=win32clipboard.RegisterClipboardFormat('FileGroupDescriptorW')
                 contents=win32clipboard.RegisterClipboardFormat('FileContents')
                 fmt=lambda cf,index,tymed:(cf,None,pythoncom.DVASPECT_CONTENT,index,tymed)
                 formats=obj.EnumFormatEtc(pythoncom.DATADIR_GET).Next(100)
                 assert {f[3] for f in formats if f[0]==contents}=={0,1,2,3}
                 obj.QueryGetData(fmt(contents,-1,pythoncom.TYMED_ISTREAM))
+                checkpoint('native descriptor')
                 desc=obj.GetData(fmt(descriptor,-1,pythoncom.TYMED_HGLOBAL))
+                checkpoint('native descriptor returned')
                 assert bytes(desc.data)==mime.descriptor_bytes() and not mime.paths
                 for i,width in enumerate((504,500,504,502)):
+                    checkpoint('native stream '+str(i))
                     medium=obj.GetData(fmt(contents,i,pythoncom.TYMED_ISTREAM))
+                    checkpoint('native stream returned '+str(i))
                     raw=medium.data.Read(16*1024*1024)
                     assert int(PdfReader(io.BytesIO(raw)).pages[0].mediabox.width)==width
+                    checkpoint('native global '+str(i))
                     second=obj.GetData(fmt(contents,i,pythoncom.TYMED_HGLOBAL))
+                    checkpoint('native global returned '+str(i))
                     assert bytes(second.data)==raw
                     del medium,second
                 assert len(mime.paths)==4
+                checkpoint('native release')
                 del obj,drop_source,desc
+                checkpoint('native release passed')
                 report['native_virtual_file_payloads']=True
                 if os.environ.get('THEVIEWER_ISOLATED_DRAG_TEST')=='1':
+                    checkpoint('native Qt drop')
                     native_drag_qt_smoke(mime)
+                    checkpoint('native Qt drop passed')
                     report['native_qt_drop']=True
+            checkpoint('source close')
             source.unlink()
             assert len(PdfReader(refs[0].path).pages)==4
             report['cross_window_owned_copy']=True
             report['passed']=True
         finally:
             shutil.rmtree(mime.directory,ignore_errors=True);mime.deleteLater();app.processEvents()
+    checkpoint('complete')
     return report
 
 

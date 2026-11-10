@@ -584,6 +584,11 @@ def run_checks(namespace, report_path, nonce):
                         raise ValueError('Windows Shell 속성 인터페이스를 확인할 수 없습니다.')
                 finally:
                     pythoncom.CoUninitialize()
+                if 'page_drag_selftest' in namespace:
+                    details=namespace['page_drag_selftest']()
+                    if details.get('passed') is not True or details.get('native_virtual_file_payloads') is not True:
+                        raise ValueError('Windows PDF page-transfer protocol check failed')
+                    return details
                 return 'DPAPI 테스트 값 왕복·COM/Shell DLL 로드 (사용자 키 접근 없음)'
             check('Windows pywin32·키 저장·Shell', windows)
         else:
