@@ -13,6 +13,7 @@ from ci_common import ROOT, BUILD_TOOLS, release_config, inside
 from build_common import BuildError, atomic_json, read_json, clean_environment
 from github_release import prepare_release, verify_plan_files
 from installer_build import find_iscc, inspect_iscc
+from check_page_drag_exe import check_executable as check_page_drag_executable
 
 KOREAN_SHA256 = 'a9427833f1975fb13dcaa09bc38aa16eba07698ce9d9596575fdd3362f2646a1'
 
@@ -60,6 +61,9 @@ def build() -> dict:
         raise BuildError('The original Windows EXE checks did not pass')
     if result.get('viewer_version') != config['version']:
         raise BuildError('Build version mismatch')
+    page_drag_report = check_page_drag_executable(Path(result['exe']))
+    atomic_json(run / 'Page_Drag_Verification.json', page_drag_report)
+    print('Packaged page-transfer/virtual-file checks passed; physical Explorer mouse dragging is not covered.')
     plan = prepare_release({'repo': repository, 'tag': config['tag'], 'title': 'The Viewer ' + config['version'],
                             'py': result['release_py']['path'], 'zip': result['zip']['path'],
                             'installer': result['installer']['path'], 'output': str(ROOT / 'build' / 'staged'),
@@ -75,6 +79,7 @@ def build() -> dict:
                'source_checks', 'exe_checks', 'final_location_checks', 'windows_exe_checks_passed', 'tested_platform', 'python')}
     summary['commit'] = os.environ.get('GITHUB_SHA', '')
     summary['installer_sha256'] = result['installer']['sha256']
+    summary['page_drag_checks'] = page_drag_report
     atomic_json(dist / 'BUILD_VERIFICATION.json', summary)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return plan

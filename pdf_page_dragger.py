@@ -269,6 +269,7 @@ for _viewer_module_name, _viewer_module_code in (
 del _viewer_pdf_module, _viewer_module_name, _viewer_module_code
 
 import shutil
+import struct
 import os
 import json
 import math
@@ -290,7 +291,7 @@ from collections import OrderedDict
 from contextlib import contextmanager
 
 APP_NAME = 'The Viewer (정)'
-APP_VERSION = '3.13.46'
+APP_VERSION = '3.13.48'
 ENGINE_PROFILE = 'permissive-pdf'
 OFFICE_BUNDLED = False
 BLOG_URL = 'https://blog.naver.com/faintstar'
@@ -10844,6 +10845,7 @@ class ThumbnailCompareHost(QWidget):
 
     def dropEvent(self,event):
         if self.owner.dual_mode:self.owner.drop_comparison_files(self.owner.dual_preview,event)
+        elif event.mimeData().hasFormat(PAGE_TRANSFER_MIME):self.owner.dropEvent(event)
         elif self.owner.accepts_open_drop(event):
             self.owner.add_files(self.owner.canvas.pdf_paths(event.mimeData()))
             event.setDropAction(Qt.DropAction.CopyAction);event.accept()
@@ -14834,6 +14836,361 @@ class PreviewDialog(QDialog):
         self.submit_image_edit('image_delete')
 
 
+# Windows virtual files and cross-window snapshots share immutable selection metadata.
+PAGE_TRANSFER_MIME = 'application/x-the-viewer-page-transfer-v1'
+FILE_DESCRIPTOR_MIME = 'application/x-qt-windows-mime;value="FileGroupDescriptorW"'
+
+
+def page_file_signature(path):
+    stat=Path(path).stat()
+    return [stat.st_size,stat.st_mtime_ns,stat.st_ino]
+
+
+def page_transfer_payload(pages,session,token):
+    entries=[]
+    for page in pages:
+        path=str(Path(page.path).resolve())
+        if not Path(path).is_file() or Path(path).suffix.lower()!='.pdf':return None
+        entries.append({'path':path,'number':page.number,'count':page.document_pages,
+                        'signature':page_file_signature(path)})
+    return {'schema':1,'session':session,'token':token,'pages':entries}
+
+
+def read_page_transfer(mime):
+    if not mime.hasFormat(PAGE_TRANSFER_MIME):return None
+    raw=bytes(mime.data(PAGE_TRANSFER_MIME))
+    if len(raw)>8*1024*1024:raise ValueError('전달할 페이지 정보가 너무 큽니다.')
+    data=json.loads(raw)
+    if not isinstance(data,dict) or data.get('schema')!=1:raise ValueError('페이지 전달 형식을 확인하세요.')
+    for key in ('session','token'):
+        if not isinstance(data.get(key),str) or not re.fullmatch('[0-9a-f]{32}',data[key]):
+            raise ValueError('페이지 전달 식별자가 올바르지 않습니다.')
+    entries=data.get('pages')
+    if not isinstance(entries,list) or not 1<=len(entries)<=100000:raise ValueError('전달할 페이지가 없습니다.')
+    for item in entries:
+        if not isinstance(item,dict):raise ValueError('페이지 정보가 올바르지 않습니다.')
+        path=item.get('path')
+        if not isinstance(path,str) or not Path(path).is_absolute() or Path(path).suffix.lower()!='.pdf':
+            raise ValueError('PDF 페이지 경로가 올바르지 않습니다.')
+        if any(type(item.get(key)) is not int or item[key]<0 for key in ('number','count')):
+            raise ValueError('페이지 번호가 올바르지 않습니다.')
+        signature=item.get('signature')
+        if not isinstance(signature,list) or len(signature)!=3 or any(type(v) is not int or v<0 for v in signature):
+            raise ValueError('원본 파일 정보가 올바르지 않습니다.')
+    return data
+
+
+def verify_page_transfer(data):
+    for item in data['pages']:
+        if page_file_signature(item['path'])!=item['signature']:
+            raise ValueError('드래그를 시작한 뒤 원본이 변경되었습니다. 다시 선택해 주세요.')
+
+
+def snapshot_page_transfer(data,directory):
+    """Finish and verify the entire owned copy before mutating the receiving window."""
+    verify_page_transfer(data)
+    pages=[PageRef(p['path'],p['number'],document_pages=p['count']) for p in data['pages']]
+    paths=[]
+    try:
+        paths=export_pages(pages,directory,'전달받은_페이지',False)
+        verify_page_transfer(data)
+        import viewer_pdf_engine
+        with viewer_pdf_engine.open(paths[0]) as doc:
+            count=len(doc)
+            if count!=total_page_count(pages):raise ValueError('전달받은 PDF의 페이지 수가 다릅니다.')
+        return [PageRef(str(paths[0]),i) for i in range(count)]
+    except BaseException:
+        for path in paths:path.unlink(missing_ok=True)
+        raise
+
+
+def virtual_file_descriptors(names):
+    """FILEGROUPDESCRIPTORW, explicit Windows 32-bit fields and 260 UTF-16 units."""
+    import struct
+    result=bytearray(struct.pack('<I',len(names)))
+    for name in names:
+        encoded=name.encode('utf-16-le')
+        if len(encoded)>518 or Path(name).name!=name:raise ValueError('사본 이름이 너무 깁니다.')
+        descriptor=bytearray(592)
+        struct.pack_into('<I',descriptor,0,0x80004004)  # UNICODE | PROGRESSUI | ATTRIBUTES
+        struct.pack_into('<I',descriptor,36,0x80)  # FILE_ATTRIBUTE_NORMAL, size is unknown until rendered.
+        descriptor[72:72+len(encoded)]=encoded
+        result.extend(descriptor)
+    return bytes(result)
+
+
+def create_windows_drag_objects(mime, cancelled, report_error=None):
+    import ctypes
+    import pythoncom
+    import win32clipboard
+    import win32con
+    import winerror
+    from win32com.server.exception import COMException
+    from win32com.server.util import NewEnum, wrap
+    from win32com.shell import shell
+
+    HGLOBAL, ISTREAM = pythoncom.TYMED_HGLOBAL, pythoncom.TYMED_ISTREAM
+    ASPECT = pythoncom.DVASPECT_CONTENT
+    CF_CONTENTS = win32clipboard.RegisterClipboardFormat('FileContents')
+    CF_DESCRIPTOR = win32clipboard.RegisterClipboardFormat('FileGroupDescriptorW')
+    CF_PREFERRED = win32clipboard.RegisterClipboardFormat('Preferred DropEffect')
+    effect_formats = {
+        win32clipboard.RegisterClipboardFormat(name)
+        for name in ('Performed DropEffect', 'Logical Performed DropEffect', 'Paste Succeeded')
+    }
+    static = {}
+    for raw_name in mime.formats():
+        name = str(raw_name)
+        if name == 'text/uri-list':
+            continue
+        match = re.fullmatch(r'application/x-qt-windows-mime;value="([^"]+)"(?:;index=\d+)?', name)
+        clipboard_name = match.group(1) if match else name
+        if clipboard_name == 'FileContents':
+            continue
+        static[win32clipboard.RegisterClipboardFormat(clipboard_name)] = bytes(mime.data(name))
+    if CF_DESCRIPTOR not in static and hasattr(mime, 'descriptor_bytes'):
+        static[CF_DESCRIPTOR] = bytes(mime.descriptor_bytes())
+    if CF_DESCRIPTOR not in static:
+        raise ValueError('FileGroupDescriptorW is required for a native page drag')
+    descriptor = static[CF_DESCRIPTOR]
+    if len(descriptor) < 4:
+        raise ValueError('Invalid FileGroupDescriptorW header')
+    count = struct.unpack_from('<I', descriptor)[0]
+    if not count or len(descriptor) != 4 + 592 * count:
+        raise ValueError('Invalid FileGroupDescriptorW count or descriptor length')
+    static[CF_PREFERRED] = struct.pack('<I', 1)  # Copy only, never move originals.
+    errors = []
+    mime._native_drag_errors = errors
+    mime.native_cancelled = False
+
+    def fail(code, message='Unsupported drag data'):
+        raise COMException(desc=message, scode=code)
+
+    def is_cancelled():
+        return bool(mime.native_cancelled or cancelled())
+
+    class DataObject:
+        _com_interfaces_ = [pythoncom.IID_IDataObject]
+        _public_methods_ = [
+            'GetData', 'GetDataHere', 'QueryGetData', 'GetCanonicalFormatEtc',
+            'SetData', 'EnumFormatEtc', 'DAdvise', 'DUnadvise', 'EnumDAdvise',
+        ]
+
+        def __init__(self):
+            self.paths = None
+            self.preparing = False
+            self.failed = False
+            self.effects = {}
+
+        def check_format(self, fmt, query=False):
+            cf, target, aspect, index, tymed = fmt
+            if aspect != ASPECT:
+                fail(winerror.DV_E_DVASPECT)
+            if cf == CF_CONTENTS:
+                if not (0 <= index < count or (query and index == -1)):
+                    fail(winerror.DV_E_LINDEX)
+                if not tymed & (ISTREAM | HGLOBAL):
+                    fail(winerror.DV_E_TYMED)
+            elif cf in static:
+                if index != -1:
+                    fail(winerror.DV_E_LINDEX)
+                if not tymed & HGLOBAL:
+                    fail(winerror.DV_E_TYMED)
+            else:
+                fail(winerror.DV_E_FORMATETC)
+
+        def QueryGetData(self, fmt):
+            # No file reads, subprocess, or export from capability probes.
+            self.check_format(fmt, query=True)
+
+        def files(self):
+            if self.failed:
+                fail(winerror.E_FAIL, 'Page export previously failed')
+            if self.preparing:
+                fail(winerror.E_UNEXPECTED, 'Recursive page export request')
+            if is_cancelled():
+                fail(winerror.E_ABORT, 'Page copy cancelled')
+            if self.paths is None:
+                self.preparing = True
+                try:
+                    result = mime.ensure_files()
+                    paths = result if result is not None else getattr(mime, 'paths', None)
+                    paths = [Path(path) for path in (paths or [])]
+                    if len(paths) != count or any(not path.is_file() for path in paths):
+                        raise ValueError('Export did not produce all advertised PDF files')
+                    if is_cancelled():
+                        fail(winerror.E_ABORT, 'Page copy cancelled')
+                    self.paths = paths
+                except Exception as exc:
+                    self.failed = True
+                    errors.append(exc)
+                    fail(winerror.E_ABORT if is_cancelled() else winerror.E_FAIL,
+                         'Page export cancelled' if is_cancelled() else 'Page export failed')
+                finally:
+                    self.preparing = False
+            return self.paths
+
+        def GetData(self, fmt):
+            self.check_format(fmt)
+            cf, target, aspect, index, tymed = fmt
+            medium = pythoncom.STGMEDIUM()
+            if cf != CF_CONTENTS:
+                # bytes would acquire an extra NUL in pywin32, breaking JSON
+                # and altering binary payload lengths. memoryview is exact.
+                medium.set(HGLOBAL, memoryview(static[cf]))
+                return medium
+            path = self.files()[index]
+            try:
+                if tymed & ISTREAM:
+                    # STGM_READ | STGM_SHARE_DENY_WRITE; fresh cursor each call.
+                    stream = shell.SHCreateStreamOnFileEx(str(path), 0x20, 0, False)
+                    medium.set(ISTREAM, stream)
+                else:
+                    medium.set(HGLOBAL, memoryview(path.read_bytes()))
+                return medium
+            except Exception as exc:
+                errors.append(exc)
+                fail(winerror.E_FAIL, 'Cannot open the prepared PDF copy')
+
+        def GetDataHere(self, fmt):
+            fail(winerror.E_NOTIMPL)
+
+        def GetCanonicalFormatEtc(self, fmt):
+            cf, target, aspect, index, tymed = fmt
+            return (cf, None, aspect, index, tymed)
+
+        def SetData(self, fmt, medium, release):
+            cf, target, aspect, index, tymed = fmt
+            if cf not in effect_formats or aspect != ASPECT or not tymed & HGLOBAL:
+                fail(winerror.DV_E_FORMATETC)
+            data = bytes(medium.data)
+            if len(data) < 4:
+                fail(winerror.DV_E_FORMATETC)
+            self.effects[cf] = struct.unpack_from('<I', data)[0]
+            # The pywin32 gateway owns/relinquishes STGMEDIUM as appropriate.
+
+        def EnumFormatEtc(self, direction):
+            if direction == pythoncom.DATADIR_GET:
+                formats = [(cf, None, ASPECT, -1, HGLOBAL) for cf in static]
+                formats += [(CF_CONTENTS, None, ASPECT, i, ISTREAM | HGLOBAL)
+                            for i in range(count)]
+            elif direction == pythoncom.DATADIR_SET:
+                formats = [(cf, None, ASPECT, -1, HGLOBAL) for cf in effect_formats]
+            else:
+                fail(winerror.E_INVALIDARG)
+            return NewEnum(formats, iid=pythoncom.IID_IEnumFORMATETC)
+
+        def DAdvise(self, *args):
+            fail(winerror.OLE_E_ADVISENOTSUPPORTED)
+
+        def DUnadvise(self, *args):
+            fail(winerror.OLE_E_ADVISENOTSUPPORTED)
+
+        def EnumDAdvise(self):
+            fail(winerror.OLE_E_ADVISENOTSUPPORTED)
+
+    class DropSource:
+        _com_interfaces_ = [pythoncom.IID_IDropSource]
+        _public_methods_ = ['QueryContinueDrag', 'GiveFeedback']
+
+        def QueryContinueDrag(self, escape, key_state):
+            if escape or key_state & win32con.MK_RBUTTON or is_cancelled():
+                mime.native_cancelled = True
+                return 0x00040101  # DRAGDROP_S_CANCEL
+            if not key_state & win32con.MK_LBUTTON:
+                return 0x00040100  # DRAGDROP_S_DROP
+            return 0  # S_OK
+
+        def GiveFeedback(self, effect):
+            return 0x00040102  # DRAGDROP_S_USEDEFAULTCURSORS
+
+    obj, source = DataObject(), DropSource()
+    return (wrap(obj, pythoncom.IID_IDataObject),
+            wrap(source, pythoncom.IID_IDropSource))
+
+
+def run_windows_page_drag(mime, cancelled, report_error):
+    """Run one native operation; return 1 (CopyAction) or 0 (IgnoreAction)."""
+    import ctypes
+    import pythoncom
+
+    ole32 = ctypes.OleDLL('ole32')
+    ole32.OleInitialize.argtypes = [ctypes.c_void_p]
+    ole32.OleInitialize.restype = ctypes.c_long
+    ole32.OleUninitialize.argtypes = []
+    ole32.OleUninitialize.restype = None
+    # Qt normally already initialized OLE. Balance our own S_OK/S_FALSE call.
+    ole32.OleInitialize(None)
+    errors = []
+    try:
+        obj, source = create_windows_drag_objects(mime, cancelled, report_error)
+        result = pythoncom.DoDragDrop(obj, source, 1)
+    except Exception as exc:
+        errors.append(exc)
+        result = 0
+    finally:
+        ole32.OleUninitialize()
+    errors = getattr(mime, '_native_drag_errors', []) + errors
+    if errors and not getattr(mime, 'native_cancelled', False):
+        report_error(errors[0])
+    return int(result) & 1
+
+
+class PageDragData(QMimeData):
+    """Cheap metadata until a native target actually requests completed file contents."""
+    def __init__(self,pages,session,separate=False,cancelled=lambda:False):
+        super().__init__();self.pages=list(pages);self.separate=bool(separate)
+        self.token=uuid.uuid4().hex;self.directory=TEMP_ROOT/'outgoing'/self.token
+        self.paths=[];self.error='';self.rendering=False;self.cancelled=cancelled
+        self.stem='PDF_사본_'+self.token[:10]
+        count=total_page_count(pages) if separate else 1
+        self.names=[f'{self.stem}_{i+1:03d}.pdf' if separate else self.stem+'.pdf' for i in range(count)]
+        self.setData(MIME,json.dumps({'session':session,'ids':[p.uid for p in pages]}).encode())
+        self.transfer=page_transfer_payload(pages,session,self.token)
+        if self.transfer:self.setData(PAGE_TRANSFER_MIME,json.dumps(self.transfer,ensure_ascii=True).encode('ascii'))
+
+    def descriptor_bytes(self):return virtual_file_descriptors(self.names)
+
+    def ensure_files(self):
+        if self.cancelled():raise ExportCancelled()
+        if self.paths:return self.paths
+        if self.error:raise RuntimeError(self.error)
+        if self.rendering:raise RuntimeError('PDF 사본 요청이 중복되었습니다.')
+        self.rendering=True
+        dialog=None
+        try:
+            if self.transfer:verify_page_transfer(self.transfer)
+            pages=expanded_page_refs(self.pages)
+            self.directory.mkdir(parents=True,exist_ok=False)
+            targets=[self.directory/name for name in self.names]
+            # No nested modal exec() inside the OLE GetData callback. The existing
+            # child worker still supplies progress and exclusive final publication.
+            if all(not is_image_source(p.path) for p in pages):
+                dialog=PdfExportDialog(QApplication.activeWindow(),pages,targets,self.stem,self.separate)
+                dialog.setWindowModality(Qt.WindowModality.ApplicationModal);dialog.show()
+                while not dialog.ended:
+                    QApplication.processEvents()
+                    if self.cancelled() and not dialog.cancelled:dialog.reject()
+                    time.sleep(.01)
+                if dialog.cancelled:raise ExportCancelled()
+                if dialog.error or not dialog.result_paths:raise RuntimeError(dialog.error or 'PDF 사본 생성 실패')
+                paths=[Path(p) for p in dialog.result_paths]
+            else:
+                paths=export_pages(pages,self.directory,self.stem,self.separate)
+            if self.cancelled():raise ExportCancelled()
+            if self.transfer:verify_page_transfer(self.transfer)
+            self.paths=paths
+            return self.paths
+        except BaseException as exc:
+            if isinstance(exc,ExportCancelled):self.native_cancelled=True
+            self.error='복사를 취소했습니다.' if isinstance(exc,ExportCancelled) else str(exc)
+            shutil.rmtree(self.directory,ignore_errors=True)
+            raise
+        finally:
+            self.rendering=False
+            if dialog is not None:dialog.hide();dialog.deleteLater()
+
+
 class DragCancelGuard(QObject):
     """앱 안의 우클릭과 Windows OLE 드래그 중 우클릭을 모두 감시한다."""
     def __init__(self, canvas, allow_external=False):
@@ -15305,92 +15662,58 @@ class PageCanvas(QAbstractScrollArea):
 
     def begin_drag(self):
         pages = self.selected_pages()
-        if not pages:return
+        if not pages or self.owner.clear_pending or self.owner.page_batch_job is not None:return
+        editor=self.owner.preview_dialog
+        if editor is not None and (editor.busy or editor.has_pending_move()):return
         QToolTip.hideText()
-        directory = TEMP_ROOT / uuid.uuid4().hex
-        paths=[]
-        # Internal moves carry references only: no PDF reads, image decoding or
-        # temporary output. Switch to the standard file drag only outside this
-        # application, retaining Explorer / other-process Viewer copy support.
-        file_drag = sys.platform!='win32' and QApplication.platformName()!='xcb'
-        self.dragging = {p.uid for p in pages}
-        self.internal_drop = False
-        self.cancelled_drag = False
-        first = next(i for i,p in enumerate(self.owner.pages) if p.uid in self.dragging)
-        self.slot = sum(p.uid not in self.dragging for p in self.owner.pages[:first])
-        self.layout_pages()
-        drag=None;target=None;result=Qt.DropAction.IgnoreAction
-        external_transition=False
+        self.dragging={p.uid for p in pages};self.internal_drop=False;self.cancelled_drag=False
+        first=next(i for i,p in enumerate(self.owner.pages) if p.uid in self.dragging)
+        self.slot=sum(p.uid not in self.dragging for p in self.owner.pages[:first]);self.layout_pages()
+        mime=None;drag=None;target=ExplorerTarget();monitor=QTimer(self)
+        monitor.timeout.connect(target.sample);monitor.start(75)
+        self.cancel_guard=DragCancelGuard(self)
+        self.cancel_guard.start()
         try:
-            while True:
-                if file_drag and not paths:
-                    try:
-                        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-                        paths = export_pages(pages,directory,'PDF_사본_'+uuid.uuid4().hex[:10],self.owner.separate)
-                    except ExportCancelled:return
-                    except Exception as exc:
-                        QMessageBox.warning(self,'PDF 사본 생성 실패',str(exc));return
-                    finally:QApplication.restoreOverrideCursor()
-                    if external_transition and not DragCancelGuard.left_pressed():
-                        # Releasing during a slow external export must not start
-                        # a second native drag with no mouse button held.
-                        for path in paths:path.unlink(missing_ok=True)
-                        try:directory.rmdir()
-                        except OSError:pass
-                        QToolTip.showText(QCursor.pos(),'복사가 취소되었습니다. 바깥으로 끌 때는 사본 준비가 끝날 때까지 마우스를 누르고 있어 주세요.',self)
-                        return
-                mime = QMimeData()
-                mime.setData(MIME,json.dumps({'session':self.owner.session,'ids':[p.uid for p in pages]}).encode())
-                if file_drag:
-                    mime.setUrls([QUrl.fromLocalFile(str(p.resolve())) for p in paths])
-                    mime.setData('application/x-qt-windows-mime;value="Preferred DropEffect"', b'\x01\x00\x00\x00')
-                drag = QDrag(self)
-                drag.setMimeData(mime)
-                drag.setPixmap(pdf_badge(total_page_count(pages)))
-                drag.setHotSpot(QPoint(22,20))
-                self.cancel_guard = DragCancelGuard(self,allow_external=not file_drag)
-                self.cancel_guard.start()
-                # Shell/COM discovery is unnecessary for internal page moves.
-                target = ExplorerTarget() if file_drag else None
-                monitor = QTimer(self)
-                if target is not None:
-                    monitor.timeout.connect(target.sample);monitor.start(75)
-                try:
-                    result = drag.exec(Qt.DropAction.CopyAction,Qt.DropAction.CopyAction)
-                    if target is not None:target.sample()
-                finally:
-                    monitor.stop();monitor.deleteLater()
-                    guard=self.cancel_guard
-                    wants_external=guard.external_requested
-                    left_pressed=guard.left_pressed() if wants_external else False
-                    guard.stop();guard.deleteLater();self.cancel_guard=None
-                if wants_external and not self.cancelled_drag and not self.internal_drop:
-                    # The native drag has ended; it is now safe to prepare file
-                    # copies and restart it while the mouse is still held.
-                    drag.deleteLater();drag=None
-                    if not left_pressed:break
-                    external_transition=True;file_drag=True;continue
-                break
-            internal = self.internal_drop
-            if not self.cancelled_drag and not internal and result == Qt.DropAction.CopyAction:
+            mime=PageDragData(pages,self.owner.session,self.owner.separate,lambda:self.cancelled_drag)
+            if sys.platform=='win32':
+                # One native OLE session: descriptors are cheap and file content
+                # is rendered on demand after release, never by cancelling and restarting.
+                copied=run_windows_page_drag(mime,lambda:self.cancelled_drag,
+                                             lambda error:setattr(mime,'error',str(error)))
+                self.cancelled_drag=self.cancelled_drag or getattr(mime,'native_cancelled',False)
+            else:
+                # Non-Windows compatibility path uses regular file URLs.
+                paths=mime.ensure_files()
+                mime.setUrls([QUrl.fromLocalFile(str(p)) for p in paths])
+                drag=QDrag(self);drag.setMimeData(mime)
+                drag.setPixmap(pdf_badge(total_page_count(pages)));drag.setHotSpot(QPoint(22,20))
+                copied=drag.exec(Qt.DropAction.CopyAction,Qt.DropAction.CopyAction)==Qt.DropAction.CopyAction
+            target.sample()
+            if copied and not self.cancelled_drag and not self.internal_drop and mime.paths:
                 self.owner.mark_exported(pages)
-            if (not self.cancelled_drag and not internal and drag is not None and drag.target() is None and
-                    target is not None and target.is_explorer and result == Qt.DropAction.CopyAction and self.owner.rename_after):
-                QTimer.singleShot(200,lambda: self.owner.rename_copies(paths,target,pages))
-            elif internal:
-                for path in paths:path.unlink(missing_ok=True)
-                try:directory.rmdir()
-                except OSError:pass
-            # Keep staged sources alive for asynchronous external consumers.
+                if target.is_explorer and self.owner.rename_after:
+                    paths=list(mime.paths)
+                    QTimer.singleShot(200,lambda:self.owner.rename_copies(paths,target,pages))
+            elif mime.error and not self.cancelled_drag:
+                QMessageBox.warning(self,'PDF 사본 생성',mime.error)
+        except ExportCancelled:pass
+        except Exception as exc:QMessageBox.warning(self,'페이지 드래그',str(exc))
         finally:
-            self.dragging.clear();self.slot=None;self.pointer=None;self.external_hover=False
-            self.layout_pages()
+            monitor.stop();monitor.deleteLater()
+            self.cancel_guard.stop();self.cancel_guard.deleteLater();self.cancel_guard=None
+            self.dragging.clear();self.slot=None;self.pointer=None;self.external_hover=False;self.layout_pages()
             if drag is not None:drag.deleteLater()
+            elif mime is not None:mime.deleteLater()
+
+    def is_page_transfer(self,mime):
+        if self.is_internal(mime):return False
+        try:return read_page_transfer(mime) is not None
+        except (ValueError,TypeError,KeyError,UnicodeError):return False
 
     def is_internal(self, mime):
         try:
             return json.loads(bytes(mime.data(MIME))).get('session') == self.owner.session
-        except (ValueError,TypeError):
+        except (ValueError,TypeError,AttributeError,UnicodeError):
             return False
 
     def pdf_paths(self, mime):
@@ -15419,7 +15742,7 @@ class PageCanvas(QAbstractScrollArea):
             event.ignore();return
         if self.cancel_guard is not None and self.cancelled_drag:
             event.ignore();return
-        if self.is_internal(event.mimeData()) or self.pdf_paths(event.mimeData()):
+        if self.is_internal(event.mimeData()) or self.is_page_transfer(event.mimeData()) or self.pdf_paths(event.mimeData()):
             if self.is_internal(event.mimeData()):
                 data = json.loads(bytes(event.mimeData().data(MIME)))
                 self.dragging = set(data['ids']) & set(self.owner.by_id)
@@ -15437,7 +15760,7 @@ class PageCanvas(QAbstractScrollArea):
         if self.owner.clear_pending or self.cancelled_drag or event.buttons() & Qt.MouseButton.RightButton:
             if self.cancel_guard is not None:self.cancel_guard.cancel()
             event.ignore();return
-        if not (self.is_internal(event.mimeData()) or self.pdf_paths(event.mimeData())):
+        if not (self.is_internal(event.mimeData()) or self.is_page_transfer(event.mimeData()) or self.pdf_paths(event.mimeData())):
             event.ignore();return
         event.setDropAction(Qt.DropAction.CopyAction);event.accept()
         self.pointer = event.position()+QPointF(0,self.verticalScrollBar().value())
@@ -15465,6 +15788,10 @@ class PageCanvas(QAbstractScrollArea):
             self.slot = None;self.dragging.clear()
             self.owner.reorder(data['ids'],slot)
             self.internal_drop = True
+        elif event.mimeData().hasFormat(PAGE_TRANSFER_MIME):
+            if not self.owner.receive_page_transfer(event.mimeData(),slot):
+                self.slot=None;self.pointer=None;self.external_hover=False;self.layout_pages()
+                event.ignore();return
         else:
             paths = self.pdf_paths(event.mimeData())
             if not paths:
@@ -16972,22 +17299,68 @@ class Window(QMainWindow):
             '지원 파일 (*.pdf *.jpg *.jpeg *.png *.webp *.tif *.tiff *.bmp *.gif *.zip *.cbz *.txt *.py *.pyw *.md *.log *.json *.ini *.cfg *.csv *.tsv *.xml *.yaml *.yml *.toml *.js *.ts *.css *.html *.sql *.bat *.cmd *.ps1 *.sh *.lsp *.c *.h *.cpp *.cs *.java *.text *.markdown *.conf *.jsonl *.htm *.hpp);;문서 변환 (*.psd *.dxf *.xls *.xlsx *.xlsm *.ppt *.pptx *.pptm *.doc *.docx *.docm *.hwp *.hwpx)')
         if paths:self.replace_inputs(paths)
 
+    def receive_page_transfer(self,mime,slot=None):
+        if (self.clear_pending or self.closing or self.page_batch_job is not None or
+                self.pending_import or self.imports or getattr(self,'receiving_page_drop',False)):return False
+        directory=None
+        try:
+            data=read_page_transfer(mime)
+            if data is None or data['session']==self.session:return False
+            received=getattr(self,'received_page_drops',None)
+            if received is None:self.received_page_drops=received=OrderedDict()
+            key=(data['session'],data['token'])
+            if key in received:return True
+            self.receiving_page_drop=True
+            at=len(self.pages) if slot is None else max(0,min(slot,len(self.pages)))
+            directory=TEMP_ROOT/self.session/'imports'/('drop-'+uuid.uuid4().hex)
+            pages=snapshot_page_transfer(data,directory)
+            old_pages=list(self.pages);old_history=list(self.history);old_future=list(self.future)
+            old_selected=set(self.canvas.selected);old_anchor=self.canvas.anchor
+            try:self.insert_page_refs(pages,at)
+            except Exception:
+                self.pages=old_pages;self.history=old_history;self.future=old_future
+                self.canvas.selected=old_selected;self.canvas.anchor=old_anchor
+                try:self.refresh()
+                except Exception:pass
+                raise
+            received[key]=True
+            while len(received)>256:received.popitem(last=False)
+            QTimer.singleShot(0,self.focus_after_file_drop)
+            return True
+        except ExportCancelled:return False
+        except Exception as exc:
+            QMessageBox.warning(self,'페이지 전달 실패',str(exc));return False
+        finally:
+            self.receiving_page_drop=False
+            if directory is not None:
+                refs={p.path for p in self.pages}
+                if not any(str(path) in refs for path in directory.glob('*.pdf')):
+                    shutil.rmtree(directory,ignore_errors=True)
+
     def accepts_open_drop(self,event):
         return (not self.clear_pending and not event.buttons() & Qt.MouseButton.RightButton and
-                not self.canvas.is_internal(event.mimeData()) and bool(self.canvas.pdf_paths(event.mimeData())))
+                not self.canvas.is_internal(event.mimeData()) and
+                (self.canvas.is_page_transfer(event.mimeData()) or bool(self.canvas.pdf_paths(event.mimeData()))))
 
     def dragEnterEvent(self,event):
         if self.accepts_open_drop(event):event.setDropAction(Qt.DropAction.CopyAction);event.accept()
         else:event.ignore()
 
     def dropEvent(self,event):
-        # 확대/빈 화면은 새로 열기, 썸네일 영역만 삽입 위치를 정해 추가한다.
+        # Foreign Viewer pages insert after the active page. Ordinary files retain open semantics.
+        if event.mimeData().hasFormat(PAGE_TRANSFER_MIME):
+            if self.accepts_open_drop(event) and self.receive_page_transfer(event.mimeData(),self.after_selection()):
+                event.setDropAction(Qt.DropAction.CopyAction);event.accept()
+            else:event.ignore()
+            return
         if self.accepts_open_drop(event) and self.replace_inputs(self.canvas.pdf_paths(event.mimeData())):
             event.setDropAction(Qt.DropAction.CopyAction);event.accept()
             QTimer.singleShot(0,self.focus_after_file_drop)
         else:event.ignore()
 
     def drop_comparison_files(self,editor,event):
+        if event.mimeData().hasFormat(PAGE_TRANSFER_MIME):
+            self.dropEvent(event);return
         if self.book_mode and self.accepts_open_drop(event):
             paths=self.canvas.pdf_paths(event.mimeData());self.close_dual_mode(animate=False);self.book_drop_pending=True
             self.dual_kind='book';self.thumbnail_host.sync_modes()
@@ -17751,6 +18124,7 @@ class Window(QMainWindow):
 
     def cleanup_working_files(self,scopes=None,closing=False):
         references=[];protected=[];root=TEMP_ROOT/self.session
+        if self.canvas.dragging or getattr(self,'receiving_page_drop',False):return
         if not closing:
             refs=list(self.pages)+self.clipboard_pages
             for state in self.history+self.future:refs.extend(state)
@@ -18687,6 +19061,8 @@ class Window(QMainWindow):
     install_downloaded_update=tv_window_install_update
 
     def closeEvent(self,event):
+        if self.canvas.dragging or getattr(self,'receiving_page_drop',False):
+            event.ignore();return
         if self.page_batch_job is not None:
             QTimer.singleShot(120,self.close);event.ignore();return
         if self.page_number_session is not None:self.page_number_session.close()
@@ -21226,6 +21602,271 @@ def publish_print_pdf(source, target, options, *, progress=None, cancelled=lambd
     finally:
         part.unlink(missing_ok=True)
         if cache is not None:cache.cleanup()
+
+def native_drag_qt_smoke(mime):
+    import ctypes
+    from ctypes import wintypes
+    import json
+    import os
+    import sys
+    import threading
+    import time
+    import pythoncom
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication, QWidget
+
+    if sys.platform != 'win32':
+        raise RuntimeError('Native drag smoke test requires Windows')
+    if os.environ.get('THEVIEWER_ISOLATED_DRAG_TEST') != '1':
+        raise RuntimeError('Set THEVIEWER_ISOLATED_DRAG_TEST=1 only on an isolated CI desktop')
+    app = QApplication.instance()
+    if app is None:
+        raise RuntimeError('Create QApplication before running the native drag smoke test')
+    # Locate the integrated implementation without importing a second app module
+    # when the packaged CLI is running as __main__.
+    module = sys.modules.get(type(mime).__module__)
+    factory = getattr(module, 'create_windows_drag_objects', None)
+    if factory is None:
+        raise RuntimeError('Native page drag adapter is missing')
+
+    custom_formats = [str(fmt) for fmt in mime.formats()
+                      if str(fmt).startswith('application/')
+                      and not str(fmt).startswith('application/x-qt-windows-mime')]
+    if len(custom_formats) < 2:
+        raise ValueError('Supply internal and cross-window transfer MIME metadata')
+    expected = {fmt: bytes(mime.data(fmt)) for fmt in custom_formats}
+    evidence = {'received': False, 'copy': False, 'drag_enter': False,
+                'metadata': {}, 'export_calls': 0, 'driver_errors': []}
+    callback_errors = []
+
+    class Target(QWidget):
+        def dragEnterEvent(self, event):
+            try:
+                data = event.mimeData()
+                if all(data.hasFormat(fmt) for fmt in expected):
+                    evidence['drag_enter'] = True
+                    # Exercise GetData through Qt's native converter, not the
+                    # original Python QMimeData instance or a direct factory call.
+                    if all(bytes(data.data(fmt)) == value for fmt, value in expected.items()):
+                        event.setDropAction(Qt.DropAction.CopyAction)
+                        event.accept()
+                        return
+            except Exception as exc:
+                callback_errors.append(str(exc))
+            event.ignore()
+
+        def dragMoveEvent(self, event):
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+
+        def dropEvent(self, event):
+            try:
+                received = {fmt: bytes(event.mimeData().data(fmt)) for fmt in expected}
+                if received != expected:
+                    raise AssertionError('Qt-received native metadata differs from source')
+                evidence['metadata'] = {fmt: json.loads(value) for fmt, value in received.items()}
+                evidence['received'] = True
+                event.setDropAction(Qt.DropAction.CopyAction)
+                event.accept()
+            except Exception as exc:
+                callback_errors.append(str(exc))
+                event.ignore()
+
+    user32 = ctypes.WinDLL('user32', use_last_error=True)
+    user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+    user32.GetCursorPos.restype = wintypes.BOOL
+    user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+    user32.SetCursorPos.restype = wintypes.BOOL
+    user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    user32.GetWindowRect.restype = wintypes.BOOL
+    user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+    user32.GetAsyncKeyState.restype = ctypes.c_short
+    user32.mouse_event.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+                                  wintypes.DWORD, ctypes.c_size_t]
+    user32.mouse_event.restype = None
+    if user32.GetAsyncKeyState(1) & 0x8000 or user32.GetAsyncKeyState(2) & 0x8000:
+        raise RuntimeError('A mouse button is already held; refusing synthetic drag')
+    old_point = wintypes.POINT()
+    if not user32.GetCursorPos(ctypes.byref(old_point)):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    def pointer(x, y):
+        if not user32.SetCursorPos(x, y):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    def center(widget):
+        # Use physical HWND coordinates, avoiding Qt logical/physical DPI mixes.
+        rect = wintypes.RECT()
+        if not user32.GetWindowRect(int(widget.winId()), ctypes.byref(rect)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return ((rect.left+rect.right)//2, (rect.top+rect.bottom)//2)
+
+    done = threading.Event()
+    worker = None
+    source, target = QWidget(), Target()
+    target.setAcceptDrops(True)
+    original_ensure = mime.ensure_files
+    instance_had_ensure = 'ensure_files' in getattr(mime, '__dict__', {})
+    original_instance_ensure = getattr(mime, '__dict__', {}).get('ensure_files')
+
+    def reject_export():
+        evidence['export_calls'] += 1
+        raise AssertionError('Metadata-only native Qt drag must not export files')
+
+    mime.ensure_files = reject_export
+    ole32 = ctypes.OleDLL('ole32')
+    ole32.OleInitialize.argtypes = [ctypes.c_void_p]
+    ole32.OleInitialize.restype = ctypes.c_long
+    ole32.OleUninitialize.argtypes = []
+    ole32.OleUninitialize.restype = None
+    initialized = False
+    try:
+        for window, title in ((source, 'TheViewer isolated drag source'),
+                              (target, 'TheViewer isolated drag target')):
+            window.setWindowTitle(title)
+            window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        screen = app.primaryScreen().availableGeometry()
+        width = max(160, min(260, (screen.width()-60)//2))
+        height = min(220, max(120, screen.height()-80))
+        source.setGeometry(screen.x()+20, screen.y()+30, width, height)
+        target.setGeometry(screen.x()+screen.width()-width-20, screen.y()+30, width, height)
+        source.show();target.show();target.raise_();target.activateWindow()
+        # Settle HWND creation and OLE drop-target registration before synthesizing.
+        for _ in range(12):
+            app.processEvents()
+            time.sleep(.025)
+        start, finish = center(source), center(target)
+        pointer(*start)
+        user32.mouse_event(0x0002, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTDOWN
+        time.sleep(.05)
+        if not user32.GetAsyncKeyState(1) & 0x8000:
+            raise RuntimeError('Synthetic left-button press was not delivered')
+        deadline = time.monotonic()+10
+        ole32.OleInitialize(None)
+        initialized = True
+        data_object, drop_source = factory(mime, lambda: done.is_set() or time.monotonic() >= deadline)
+
+        def drive_pointer():
+            try:
+                if done.wait(.25):
+                    return
+                for step in range(1, 13):
+                    if done.is_set():
+                        return
+                    pointer(round(start[0]+(finish[0]-start[0])*step/12),
+                            round(start[1]+(finish[1]-start[1])*step/12))
+                    if done.wait(.025):
+                        return
+                done.wait(.4)
+            except Exception as exc:
+                evidence['driver_errors'].append(str(exc))
+            finally:
+                user32.mouse_event(0x0004, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTUP
+
+        worker = threading.Thread(target=drive_pointer, name='isolated-drag-input', daemon=True)
+        worker.start()
+        result = pythoncom.DoDragDrop(data_object, drop_source, 1)
+        evidence['native_effect'] = int(result)
+        evidence['copy'] = result == 1
+        evidence['native_cancelled'] = bool(getattr(mime, 'native_cancelled', False))
+        evidence['callback_errors'] = callback_errors
+        if not (evidence['received'] and evidence['drag_enter'] and evidence['copy']
+                and not evidence['export_calls'] and not callback_errors
+                and not evidence['driver_errors']):
+            raise AssertionError('Native OLE-to-Qt smoke test failed: '+repr(evidence))
+        return evidence
+    finally:
+        done.set()
+        if worker is not None:
+            worker.join(timeout=2)
+        user32.mouse_event(0x0004, 0, 0, 0, 0)
+        try:
+            pointer(old_point.x, old_point.y)
+        finally:
+            if instance_had_ensure:
+                mime.ensure_files = original_instance_ensure
+            else:
+                try:
+                    del mime.ensure_files
+                except AttributeError:
+                    mime.ensure_files = original_ensure
+            source.hide();target.hide()
+            source.deleteLater();target.deleteLater()
+            app.processEvents()
+            if initialized:
+                ole32.OleUninitialize()
+
+
+def page_drag_selftest():
+    """Protocol/owned-copy checks; this does not claim a physical Explorer mouse test."""
+    import struct
+    from pypdf import PdfReader, PdfWriter
+    app=QApplication.instance() or QApplication([])
+    app.setQuitOnLastWindowClosed(False)
+    report={'passed':False,'native_virtual_file_payloads':False,'physical_mouse_test':False}
+    with tempfile.TemporaryDirectory(prefix='TheViewerDragCheck_') as folder:
+        root=Path(folder);source=root/'source.pdf';writer=PdfWriter()
+        for n in range(5):writer.add_blank_page(width=500+n,height=700)
+        writer.write(source);original=source.read_bytes()
+        pages=[PageRef(str(source),n) for n in (4,0,4,2)]
+        mime=PageDragData(pages,uuid.uuid4().hex,separate=True)
+        try:
+            payload=read_page_transfer(mime)
+            refs=snapshot_page_transfer(payload,root/'receiver')
+            assert [int(p.mediabox.width) for p in PdfReader(refs[0].path).pages]==[504,500,504,502]
+            report['page_order_and_duplicates']=True
+            assert source.read_bytes()==original
+            assert all(Path(p.path).parent==root/'receiver' for p in refs)
+            report['source_preserved']=True
+            cancelled=PageDragData(pages,uuid.uuid4().hex,cancelled=lambda:True)
+            try:
+                try:cancelled.ensure_files()
+                except ExportCancelled:pass
+                else:raise AssertionError('Cancellation did not stop export')
+                assert not cancelled.directory.exists()
+                report['cancel_no_output']=True
+            finally:cancelled.deleteLater()
+            if sys.platform=='win32':
+                import pythoncom,win32clipboard
+                obj,drop_source=create_windows_drag_objects(mime,lambda:False)
+                descriptor=win32clipboard.RegisterClipboardFormat('FileGroupDescriptorW')
+                contents=win32clipboard.RegisterClipboardFormat('FileContents')
+                fmt=lambda cf,index,tymed:(cf,None,pythoncom.DVASPECT_CONTENT,index,tymed)
+                formats=obj.EnumFormatEtc(pythoncom.DATADIR_GET).Next(100)
+                assert {f[3] for f in formats if f[0]==contents}=={0,1,2,3}
+                obj.QueryGetData(fmt(contents,-1,pythoncom.TYMED_ISTREAM))
+                desc=obj.GetData(fmt(descriptor,-1,pythoncom.TYMED_HGLOBAL))
+                assert bytes(desc.data)==mime.descriptor_bytes() and not mime.paths
+                for i,width in enumerate((504,500,504,502)):
+                    medium=obj.GetData(fmt(contents,i,pythoncom.TYMED_ISTREAM))
+                    raw=medium.data.Read(16*1024*1024)
+                    assert int(PdfReader(io.BytesIO(raw)).pages[0].mediabox.width)==width
+                    second=obj.GetData(fmt(contents,i,pythoncom.TYMED_HGLOBAL))
+                    assert bytes(second.data)==raw
+                    del medium,second
+                assert len(mime.paths)==4
+                del obj,drop_source,desc
+                report['native_virtual_file_payloads']=True
+                if os.environ.get('THEVIEWER_ISOLATED_DRAG_TEST')=='1':
+                    native_drag_qt_smoke(mime)
+                    report['native_qt_drop']=True
+            source.unlink()
+            assert len(PdfReader(refs[0].path).pages)==4
+            report['cross_window_owned_copy']=True
+            report['passed']=True
+        finally:
+            shutil.rmtree(mime.directory,ignore_errors=True);mime.deleteLater();app.processEvents()
+    return report
+
+
+if __name__=='__main__' and '--page-drag-self-test' in sys.argv:
+    try:
+        print(json.dumps(page_drag_selftest(),ensure_ascii=True),flush=True)
+    except Exception as exc:
+        print(json.dumps({'passed':False,'error':f'{type(exc).__name__}: {exc}'},ensure_ascii=True),flush=True)
+        raise SystemExit(1)
+    raise SystemExit(0)
+
 
 if __name__=='__main__' and '--image-worker' in sys.argv:
     image_worker();raise SystemExit(0)

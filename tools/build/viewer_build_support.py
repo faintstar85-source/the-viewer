@@ -114,7 +114,7 @@ import sys
 
 if sys.platform == 'win32':
     _flags = {'--pdf-worker', '--image-worker', '--input-worker',
-              '--hangul-worker', '--image-export-worker', '--vector-worker', '--document-worker', '--print-worker', '--print-job-worker', '--pkpk-viewer-check'}
+              '--hangul-worker', '--image-export-worker', '--pdf-export-worker', '--page-drag-self-test', '--vector-worker', '--document-worker', '--print-worker', '--print-job-worker', '--pkpk-viewer-check'}
     _worker = bool(_flags.intersection(sys.argv[1:]))
     for _name, _constant, _read in (('stdin', 'STD_INPUT_HANDLE', True), ('stdout', 'STD_OUTPUT_HANDLE', False), ('stderr', 'STD_ERROR_HANDLE', False)):
         if getattr(sys, _name, None) is not None:
@@ -663,7 +663,7 @@ def viewer_collection_options() -> list[tuple[str, str]]:
     if os.name == 'nt':
         options.append(('--copy-metadata', 'pywin32'))
         options.extend(('--hidden-import', name) for name in (
-            'win32crypt', 'win32gui', 'pythoncom', 'pywintypes', 'win32com.client', 'win32job','win32process','win32api',
+            'win32crypt', 'win32gui', 'pythoncom', 'win32clipboard', 'win32con', 'winerror', 'win32com.server.util', 'win32com.server.exception', 'pywintypes', 'win32com.client', 'win32job','win32process','win32api',
             'win32com.shell.shell', 'win32com.shell.shellcon',
             'win32com.propsys.propsys', 'win32com.propsys.pscon'))
     return list(dict.fromkeys(options))

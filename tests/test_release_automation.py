@@ -52,7 +52,7 @@ class TestConfigAndCompliance(unittest.TestCase):
             with self.assertRaises(RuntimeError):strict_report(path,'test',False,0,required_count=count)
     def test_version_matches_real_source_and_publication_is_explicit(self):
         config=ci_common.release_config(ROOT)
-        self.assertEqual(config['version'], '3.13.46'); self.assertIs(type(config['publish']),bool)
+        self.assertEqual(config['version'], '3.13.48'); self.assertIs(type(config['publish']),bool)
     def test_manual_false_is_not_treated_as_true(self):
         self.assertFalse(ci_common.release_config(ROOT, 'false')['publish'])
         self.assertTrue(ci_common.release_config(ROOT, 'true')['publish'])
