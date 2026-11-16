@@ -45,6 +45,8 @@ Windows 빌드 검사는 GitHub Actions 기록으로 확인합니다. 현장 PC 
 
 ## 소스 보존과 산출물 관리
 
+혼자 작업할 때의 실수 방지 절차와 새 프로젝트용 항목은 [간단한 운영 체크리스트](SOLO_PROJECT_CHECKLIST.md)를 참고합니다.
+
 ChatGPT와 계속 개발할 수 있도록 필수 소스, 런타임 자산, 템플릿, 폰트, 모델, 빌드 설정, 테스트, 라이선스 및 고지 자료는 보존합니다. 저장소 정리 시 재현 가능한 빌드 산출물만 별도로 관리하며, 파일 크기나 확장자만으로 개발·실행에 필요한 자료를 삭제하지 않습니다.
 
 `release.yml`의 **Keep checked distribution**이 올리는 임시 `dist/` Actions artifact는 7일 보관합니다. 실패 진단 및 릴리즈 상태 artifact는 14일을 유지합니다. 이 설정 변경은 이후 업로드되는 해당 artifact에 적용되며 기존 artifact나 Releases 첨부파일을 삭제하지 않습니다.
