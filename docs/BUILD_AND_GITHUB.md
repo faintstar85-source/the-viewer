@@ -43,6 +43,14 @@ python -m unittest discover -s tests -v
 
 Windows 빌드 검사는 GitHub Actions 기록으로 확인합니다. 현장 PC 전체 동작, 실제 프린터 출력, DeepL 실서버 결과를 모두 확인했다는 의미는 아닙니다.
 
+## 소스 보존과 산출물 관리
+
+ChatGPT와 계속 개발할 수 있도록 필수 소스, 런타임 자산, 템플릿, 폰트, 모델, 빌드 설정, 테스트, 라이선스 및 고지 자료는 보존합니다. 저장소 정리 시 재현 가능한 빌드 산출물만 별도로 관리하며, 파일 크기나 확장자만으로 개발·실행에 필요한 자료를 삭제하지 않습니다.
+
+`release.yml`의 **Keep checked distribution**이 올리는 임시 `dist/` Actions artifact는 7일 보관합니다. 실패 진단 및 릴리즈 상태 artifact는 14일을 유지합니다. 이 설정 변경은 이후 업로드되는 해당 artifact에 적용되며 기존 artifact나 Releases 첨부파일을 삭제하지 않습니다.
+
+Releases 첨부파일 삭제와 Actions artifact 저장공간 관리는 별개입니다. 보관기간 단축은 임시 artifact의 저장기간을 줄일 뿐, 워크플로 실행시간을 줄이거나 이미 사용한 실행시간을 돌려주지 않습니다. 기존 main 자동 빌드·배포 트리거, 작업 의존관계와 공개 조건은 그대로 유지합니다.
+
 ## 참고
 
 - [GitHub Python 빌드](https://docs.github.com/en/actions/tutorials/build-and-test-code/python)

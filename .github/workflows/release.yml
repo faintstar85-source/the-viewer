@@ -83,7 +83,7 @@ jobs:
           name: viewer-windows-${{ needs.validate.outputs.version }}-${{ github.sha }}-${{ github.run_attempt }}
           path: dist/
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 7
       - name: Keep build diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
